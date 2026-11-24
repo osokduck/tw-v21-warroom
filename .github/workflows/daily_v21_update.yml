@@ -1,0 +1,74 @@
+name: 台股 V21.2 每日盤後全自動更新
+
+on:
+  push:
+    branches: [ main ]
+  schedule:
+    # 週一至週五 台灣時間 15:45 盤後主更新（UTC 07:45）
+    - cron: '45 7 * * 1-5'
+    # 週一至週五 台灣時間 18:10 補跑校準（UTC 10:10）
+    - cron: '10 10 * * 1-5'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  update-and-deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 1. 檢出儲存庫
+        uses: actions/checkout@v4
+
+      - name: 2. 自動歸位資料夾結構（首次執行自動整理）
+        run: |
+          mkdir -p scripts data
+          if [ -f "v21_ci.py" ]; then mv -f "v21_ci.py" "scripts/v21_ci.py"; fi
+          for f in v21_latest.json kline_bundle.json macro_config.json v21_hist.json V21_最新每日報告.md V21_全市場評分_最新.csv; do
+            if [ -f "$f" ]; then mv -f "$f" "data/$f"; fi
+          done
+
+      - name: 3. 設定 Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 4. 執行 V21.2 零誤差全市場盤後分析
+        run: python3 -B scripts/v21_ci.py
+
+      - name: 5. 自動提交最新盤後資料
+        run: |
+          git config user.name "V21 Auto Bot"
+          git config user.email "v21-bot@users.noreply.github.com"
+          git add -A scripts/ data/
+          git add -u
+          if git diff --staged --quiet; then
+            echo "今日資料無變動，略過提交。"
+          else
+            TW_DATE=$(TZ='Asia/Taipei' date '+%Y-%m-%d %H:%M')
+            git commit -m "📊 自動更新台股 V21.2 盤後戰情 (${TW_DATE} CST)"
+            git push
+          fi
+
+      - name: 6. 設定 GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: 7. 打包網站與最新盤後資料
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: 8. 發布至 GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
