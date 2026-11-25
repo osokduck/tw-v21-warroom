@@ -882,7 +882,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
 
     return {
         "calibrated": True,
-        "version": "V21.7.1",
+        "version": "V21.8",
         "tradeDate": trade_dt,
         "windowStart": bear_start_seen if bear_start_seen != "9999-99-99" else trade_dt,
         "windowEnd": bear_end_seen if bear_end_seen != "0000-00-00" else trade_dt,
@@ -922,6 +922,374 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
         "bullTop5": bull_top5,
         "bearTop5": bear_top5,
     }
+def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, trade_dt):
+    """
+    V21.8 大盤 2 年位階回測 × 2,000 檔市場廣度與雙流共振風險警示引擎
+    ================================================================================
+    1. 以近 3 年大盤日K暖機 240MA，完整回測近 2 年（最多 500 交易日）大盤五大位階表現。
+    2. 逐日結合全市場 2,000 檔真實廣度（站上20MA/60MA比例、朱家泓多空家數比）交叉判定：
+       - CRASH_ALERT   (🚨 系統性破年線危機)
+       - BEAR_DEFENSE  (🛡️ 空頭防禦修正)
+       - CONSOLIDATION (⚖️ 震盪整理換手)
+       - BULL_ATTACK   (🚀 多頭攻擊主升)
+       - OVERHEAT      (🔥 高檔過熱警戒 / 拉積盤背離)
+    3. 零前視回測「V21.8 位階動態控倉策略」vs.「100% 滿倉死抱大盤 (Buy & Hold)」2年績效與 MDD，
+       並產出當日最新位階判斷警示、關鍵防守價位與結構化風險提醒。
+    ================================================================================
+    """
+    REGIME_META = {
+        "BULL_ATTACK":   {"name": "🚀 多頭攻擊主升", "riskLevel": 1, "riskLabel": "低風險・順勢進攻", "posCap": "70%～85%", "weight": 0.85, "cls": "b-up"},
+        "CONSOLIDATION": {"name": "⚖️ 震盪整理換手", "riskLevel": 2, "riskLabel": "中低風險・區間操作", "posCap": "45%～60%", "weight": 0.55, "cls": "b-cyan"},
+        "OVERHEAT":      {"name": "🔥 高檔過熱警戒", "riskLevel": 3, "riskLabel": "中度警戒・防乖離拉回", "posCap": "45%～55%", "weight": 0.50, "cls": "b-amber"},
+        "BEAR_DEFENSE":  {"name": "🛡️ 空頭防禦修正", "riskLevel": 4, "riskLabel": "高風險・嚴控水位", "posCap": "25%～40%", "weight": 0.25, "cls": "b-amber"},
+        "CRASH_ALERT":   {"name": "🚨 系統性破線危機", "riskLevel": 5, "riskLabel": "極高風險・現金為王", "posCap": "0%～15%",  "weight": 0.10, "cls": "b-down"},
+    }
+    ORDER = ("BULL_ATTACK", "OVERHEAT", "CONSOLIDATION", "BEAR_DEFENSE", "CRASH_ALERT")
+
+    if not tx_rw or len(tx_rw) < 120:
+        return {"calibrated": False, "version": "V21.8", "note": "大盤歷史資料不足 120 日"}
+
+    dts = [r[0][:10] for r in tx_rw]
+    cl = [float(r[4]) for r in tx_rw]
+    hi = [float(r[2]) for r in tx_rw]
+    lo = [float(r[3]) for r in tx_rw]
+    n = len(cl)
+
+    ma5 = sma(cl, 5)
+    ma20 = sma(cl, 20)
+    ma60 = sma(cl, 60)
+    ma120 = sma(cl, 120)
+    ma240 = sma(cl, 240)
+
+    # OTC 20日相對強弱對照表
+    otc_r20 = {}
+    if otc_rw and len(otc_rw) >= 25:
+        ocl = [float(r[4]) for r in otc_rw]
+        for i in range(20, len(otc_rw)):
+            if ocl[i - 20] > 0:
+                otc_r20[otc_rw[i][0][:10]] = ((ocl[i] / ocl[i - 20]) - 1.0) * 100.0
+
+    # 確保至少有 60MA 暖機，優先取完整 2 年 (~500 交易日)
+    min_warm = 240 if n >= 300 else 60
+    start_idx = max(min_warm, n - 500)
+
+    def classify_day(t):
+        c = cl[t]
+        m20 = ma20[t] or c
+        m60 = ma60[t] or m20
+        m120 = ma120[t] or m60
+        m240 = ma240[t] or m120
+        m20p = ma20[t - 4] if (t >= 4 and ma20[t - 4]) else m20
+        m60p = ma60[t - 4] if (t >= 4 and ma60[t - 4]) else m60
+
+        m20sl = ((m20 / m20p) - 1.0) * 100.0 if m20p > 0 else 0.0
+        m60sl = ((m60 / m60p) - 1.0) * 100.0 if m60p > 0 else 0.0
+        b20 = ((c / m20) - 1.0) * 100.0 if m20 > 0 else 0.0
+        b60 = ((c / m60) - 1.0) * 100.0 if m60 > 0 else 0.0
+        b240 = ((c / m240) - 1.0) * 100.0 if m240 > 0 else 0.0
+
+        win_h = max(hi[max(0, t - 249):t + 1])
+        dd250 = ((c / win_h) - 1.0) * 100.0 if win_h > 0 else 0.0
+
+        rets20 = [(cl[j] / cl[j - 1] - 1.0) for j in range(max(1, t - 19), t + 1) if cl[j - 1] > 0]
+        vol20 = round(stds(rets20) * math.sqrt(252) * 100.0, 1) if len(rets20) >= 5 else 18.0
+
+        bh = (breadth_hist or {}).get(dts[t])
+        has_br = bool(bh and bh.get("tot", 0) >= 100)
+        if has_br:
+            tot_b = max(bh["tot"], 1)
+            abv20_p = round(bh["abv20"] / tot_b * 100.0, 1)
+            abv60_p = round(bh["abv60"] / tot_b * 100.0, 1)
+            zb_cnt = int(bh.get("zb", 0))
+            zs_cnt = int(bh.get("zs", 0))
+            bbr = round(zs_cnt / max(zb_cnt, 1), 2)
+        else:
+            abv20_p, abv60_p, zb_cnt, zs_cnt, bbr = None, None, 0, 0, 1.0
+
+        tx_r20 = ((c / cl[t - 20]) - 1.0) * 100.0 if (t >= 20 and cl[t - 20] > 0) else 0.0
+        o_r20 = otc_r20.get(dts[t])
+        otc_rel = round(o_r20 - tx_r20, 2) if o_r20 is not None else 0.0
+
+        # 五大位階判定規則（整合大盤均線架構 ＋ 2,000 檔市場廣度）
+        if (c < m240 * 0.97) or (dd250 <= -15.0 and ((abv20_p is not None and abv20_p < 15.0) or c < m240)):
+            rg = "CRASH_ALERT"
+        elif (c < m20 and (c < m60 or (abv20_p is not None and abv20_p < 25.0) or (has_br and bbr >= 2.2))) or (c < m240):
+            rg = "BEAR_DEFENSE"
+        elif (c > m20 and c > m60) and (
+            b20 >= 5.0 or b60 >= 11.0 or b240 >= 22.0
+            or (abv20_p is not None and abv20_p < 35.0 and b20 >= 2.0)
+        ):
+            rg = "OVERHEAT"
+        elif (c > m20 > m60) and (m20sl > 0) and (abv20_p is None or abv20_p >= 42.0):
+            rg = "BULL_ATTACK"
+        else:
+            rg = "CONSOLIDATION"
+
+        return {
+            "dt": dts[t], "rg": rg, "c": round(c, 2),
+            "m20": round(m20, 2), "m60": round(m60, 2), "m120": round(m120, 2), "m240": round(m240, 2),
+            "high250": round(win_h, 2), "dd250": round(dd250, 2),
+            "m20sl": round(m20sl, 2), "m60sl": round(m60sl, 2),
+            "b20": round(b20, 2), "b60": round(b60, 2), "b240": round(b240, 2),
+            "vol20": vol20, "abv20Pct": abv20_p, "abv60Pct": abv60_p,
+            "zbCnt": zb_cnt, "zsCnt": zs_cnt, "bearBullRatio": bbr,
+            "otcRel20": otc_rel, "hasBreadth": has_br,
+        }
+
+    daily_states = [classify_day(t) for t in range(start_idx, n)]
+    total_days = len(daily_states)
+
+    # 統計五大位階的未來 5/10/20 日大盤勝率、均報酬與 20 日回撤風險
+    buckets = {k: {"f5": [], "f10": [], "f20": [], "dd20": [], "days": 0} for k in ORDER}
+    for idx_rel, st in enumerate(daily_states):
+        t = start_idx + idx_rel
+        rk = st["rg"]
+        buckets[rk]["days"] += 1
+        c0 = cl[t]
+        if c0 <= 0:
+            continue
+        if t + 5 < n:
+            buckets[rk]["f5"].append((cl[t + 5] / c0 - 1.0) * 100.0)
+        if t + 10 < n:
+            buckets[rk]["f10"].append((cl[t + 10] / c0 - 1.0) * 100.0)
+        if t + 20 < n:
+            buckets[rk]["f20"].append((cl[t + 20] / c0 - 1.0) * 100.0)
+            min_l = min(lo[t + 1:t + 21])
+            buckets[rk]["dd20"].append((min_l / c0 - 1.0) * 100.0)
+
+    def _agg(arr):
+        if not arr:
+            return {"n": 0, "winRate": 0.0, "avgRet": 0.0}
+        return {
+            "n": len(arr),
+            "winRate": round(sum(1 for x in arr if x > 0) / len(arr) * 100.0, 1),
+            "avgRet": round(sum(arr) / len(arr), 2),
+        }
+
+    regime_stats = []
+    for k in ORDER:
+        bk = buckets[k]
+        m_info = REGIME_META[k]
+        f5, f10, f20 = _agg(bk["f5"]), _agg(bk["f10"]), _agg(bk["f20"])
+        dd_list = bk["dd20"]
+        regime_stats.append({
+            "key": k,
+            "name": m_info["name"],
+            "riskLevel": m_info["riskLevel"],
+            "posCap": m_info["posCap"],
+            "weight": m_info["weight"],
+            "days": bk["days"],
+            "pctDays": round(bk["days"] / max(total_days, 1) * 100.0, 1),
+            "win5": f5["winRate"], "ret5": f5["avgRet"],
+            "win10": f10["winRate"], "ret10": f10["avgRet"],
+            "win20": f20["winRate"], "ret20": f20["avgRet"],
+            "avgDd20": round(sum(dd_list) / len(dd_list), 2) if dd_list else 0.0,
+            "worstDd20": round(min(dd_list), 2) if dd_list else 0.0,
+        })
+
+    # 2 年零前視動態控倉回測：今日收盤決定明日持股水位（扣 0.15% 換倉摩擦成本）
+    eq_bh, eq_st = [100.0], [100.0]
+    ret_bh, ret_st = [], []
+    prev_w = REGIME_META[daily_states[0]["rg"]]["weight"]
+    eq_dates = [daily_states[0]["dt"]]
+
+    for idx_rel in range(total_days - 1):
+        t = start_idx + idx_rel
+        w = REGIME_META[daily_states[idx_rel]["rg"]]["weight"]
+        dr = (cl[t + 1] / cl[t] - 1.0) if cl[t] > 0 else 0.0
+        turnover_cost = abs(w - prev_w) * 0.0015
+        prev_w = w
+        sr = w * dr - turnover_cost
+        ret_bh.append(dr)
+        ret_st.append(sr)
+        eq_bh.append(eq_bh[-1] * (1.0 + dr))
+        eq_st.append(eq_st[-1] * (1.0 + sr))
+        eq_dates.append(daily_states[idx_rel + 1]["dt"])
+
+    def perf_metrics(eq, rets):
+        if len(eq) < 2:
+            return {"totalRet": 0.0, "cagr": 0.0, "mdd": 0.0, "annVol": 0.0, "sharpe": 0.0, "calmar": 0.0}
+        tot_r = (eq[-1] / eq[0] - 1.0) * 100.0
+        yrs = max(len(rets) / 252.0, 0.1)
+        cagr = ((eq[-1] / eq[0]) ** (1.0 / yrs) - 1.0) * 100.0
+        pk, mdd = eq[0], 0.0
+        for v in eq:
+            if v > pk:
+                pk = v
+            dd = (v / pk - 1.0) * 100.0
+            if dd < mdd:
+                mdd = dd
+        avol = stds(rets) * math.sqrt(252) * 100.0 if len(rets) >= 5 else 0.0
+        sharpe = round((sum(rets) / len(rets) * 252.0) / max(stds(rets) * math.sqrt(252), 1e-6), 2) if rets else 0.0
+        calmar = round(cagr / abs(mdd), 2) if abs(mdd) > 0.1 else 0.0
+        return {
+            "totalRet": round(tot_r, 2),
+            "cagr": round(cagr, 2),
+            "mdd": round(mdd, 2),
+            "annVol": round(avol, 1),
+            "sharpe": sharpe,
+            "calmar": calmar,
+        }
+
+    bh_perf = perf_metrics(eq_bh, ret_bh)
+    st_perf = perf_metrics(eq_st, ret_st)
+    dd_saved = round(abs(bh_perf["mdd"]) - abs(st_perf["mdd"]), 2)
+
+    # 抽樣約 70 點曲線供前端 Canvas 繪圖
+    step = max(1, len(eq_dates) // 70)
+    curve_pts = [
+        {"dt": eq_dates[i], "bh": round(eq_bh[i], 2), "st": round(eq_st[i], 2), "rg": daily_states[min(i, total_days - 1)]["rg"]}
+        for i in range(0, len(eq_dates), step)
+    ]
+    if curve_pts[-1]["dt"] != eq_dates[-1]:
+        curve_pts.append({"dt": eq_dates[-1], "bh": round(eq_bh[-1], 2), "st": round(eq_st[-1], 2), "rg": daily_states[-1]["rg"]})
+
+    # === 產出「當日最新位階判斷警示」與「2,000 檔交叉風險提醒」 ===
+    cur = daily_states[-1]
+    cur_meta = REGIME_META[cur["rg"]]
+    risk_alerts = []
+
+    # 1. 大盤均線位階防線警示
+    if cur["c"] < cur["m240"]:
+        risk_alerts.append({
+            "level": "danger", "tag": "破年線警報",
+            "title": f"加權指數跌破 240MA 年線（{cur['m240']:,.0f} 點）",
+            "detail": f"目前收盤 {cur['c']:,.1f} 點（年線乖離 {cur['b240']:+.2f}%），屬於中長期空頭警戒區，建議倉位壓低至 {cur_meta['posCap']}。"
+        })
+    elif cur["b240"] <= 3.0:
+        risk_alerts.append({
+            "level": "warn", "tag": "年線保衛戰",
+            "title": f"指數緊貼 240MA 年線支撐（僅距 {cur['b240']:+.2f}%）",
+            "detail": f"年線 {cur['m240']:,.0f} 點為最後多頭防線；上方月線 {cur['m20']:,.0f} 點與季線 {cur['m60']:,.0f} 點仍有反壓，嚴防反彈遇壓回測。"
+        })
+    elif cur["c"] < cur["m20"]:
+        risk_alerts.append({
+            "level": "warn", "tag": "月線下方修正",
+            "title": f"指數低於 20MA 月線（{cur['m20']:,.0f} 點，乖離 {cur['b20']:+.2f}%）",
+            "detail": f"短中期趨勢轉弱（月線斜率 {cur['m20sl']:+.2f}%），站回 {cur['m20']:,.0f} 點前以反彈減碼、守防線為主。"
+        })
+    else:
+        risk_alerts.append({
+            "level": "ok", "tag": "均線多頭結構",
+            "title": f"指數站穩 20MA（{cur['m20']:,.0f}）與年線（{cur['m240']:,.0f}）上方",
+            "detail": f"目前距離月線 {cur['b20']:+.2f}%、季線 {cur['b60']:+.2f}%，短線防守以不破月線為準。"
+        })
+
+    # 2. 2,000 檔市場廣度背離警示
+    abv20 = cur["abv20Pct"]
+    if abv20 is not None:
+        if cur["c"] > cur["m20"] and abv20 < 35.0:
+            risk_alerts.append({
+                "level": "danger", "tag": "拉積盤背離",
+                "title": f"指數創高／站月線，但 2,000 檔站上月線僅 {abv20}%",
+                "detail": "呈現權值撐盤、多數中小型股走弱的嚴重結構背離，追高個股極易中陷阱，務必嚴控個股 3% 停損。"
+            })
+        elif abv20 < 15.0:
+            risk_alerts.append({
+                "level": "danger", "tag": "廣度極度冰點",
+                "title": f"2,000 檔僅 {abv20}% 站上月線（多空家數比 1 : {cur['bearBullRatio']}）",
+                "detail": f"全市場朱家泓多頭僅 {cur['zbCnt']} 檔、空頭高達 {cur['zsCnt']} 檔，屬極度弱勢盤，切忌搶短攤平，僅能輕倉佈局極少數逆勢抗跌股。"
+            })
+        elif abv20 < 35.0:
+            risk_alerts.append({
+                "level": "warn", "tag": "廣度偏弱",
+                "title": f"2,000 檔站上月線比例偏低（{abv20}%）",
+                "detail": f"多數個股仍在月線下方整理（站季線 {cur['abv60Pct']}%），選股須加嚴 RS ≥ 85 與法人買超濾網。"
+            })
+        else:
+            risk_alerts.append({
+                "level": "ok", "tag": "廣度健康",
+                "title": f"2,000 檔站上月線比例達 {abv20}%（站季線 {cur['abv60Pct']}%）",
+                "detail": f"全市場多頭排列 {cur['zbCnt']} 檔，結構支撐良好，可順勢操作低乖離雙流共振股。"
+            })
+
+    # 3. 2,000 檔雙流回測交叉驗證警示
+    if isinstance(dual_bt, dict) and dual_bt.get("calibrated"):
+        bb = dual_bt.get("bestBull") or {}
+        bs = dual_bt.get("bestBear") or {}
+        b_sig = dual_bt.get("bullTotalSignals", 0)
+        s_sig = dual_bt.get("bearTotalSignals", 0)
+        ratio_sb = round(s_sig / max(b_sig, 1), 2)
+        if float(bb.get("pf", 0)) < 1.0:
+            risk_alerts.append({
+                "level": "danger", "tag": "2000檔逆風護盾",
+                "title": f"近 3 月 2,000 檔看漲 PF 僅 {bb.get('pf')}（空頭訊號為多頭 {ratio_sb} 倍）",
+                "detail": f"實測看漲均報 {bb.get('avgRet', 0):+.2f}% 處負期望值區，但看跌雙流 PF 達 {bs.get('pf')}（均報 {bs.get('avgRet', 0):+.2f}%）。已自動鎖緊看漲門檻並強化自選股破線警示。"
+            })
+        else:
+            risk_alerts.append({
+                "level": "ok", "tag": "2000檔順風確認",
+                "title": f"近 3 月 2,000 檔看漲雙流正期望（PF {bb.get('pf')}｜勝率 {bb.get('winRate')}%）",
+                "detail": f"多空訊號比正常，搭配大盤位階 {cur_meta['name']} 可依計畫執行 10 日波段與反洗盤緩衝出場。"
+            })
+
+    # 4. 乖離過熱 / 空頭急彈與波動率風險提醒
+    if cur["c"] >= cur["m240"] and (cur["b20"] >= 5.0 or cur["b240"] >= 22.0):
+        risk_alerts.append({
+            "level": "warn", "tag": "高檔乖離過熱",
+            "title": f"大盤高檔正乖離擴大（月線 {cur['b20']:+.2f}% / 年線 {cur['b240']:+.2f}%）",
+            "detail": "歷史 2 年回測顯示高乖離階段容易出現急跌洗盤，嚴禁開盤追高，建議分批獲利了結並把倉位壓在 55% 以內。"
+        })
+    elif cur["c"] < cur["m240"] and cur["b20"] >= 4.0:
+        risk_alerts.append({
+            "level": "warn", "tag": "空頭急彈過熱",
+            "title": f"破年線格局下短線急彈乖離過大（月線 {cur['b20']:+.2f}%）",
+            "detail": "中長線仍在 240MA 下方，急彈乖離擴大屬逃命波風險區，切忌追漲，逢彈優先檢視弱勢股減碼。"
+        })
+    elif cur["vol20"] >= 25.0:
+        risk_alerts.append({
+            "level": "warn", "tag": "高波動震盪",
+            "title": f"大盤 20 日年化波動率攀升至 {cur['vol20']}%（距高點回撤 {cur['dd250']:+.1f}%）",
+            "detail": "盤中上下劇烈洗盤風險高，新進部位請縮減單筆部位至原本一半，絕不使用融資擴張槓桿。"
+        })
+
+    # 綜合 V21 大盤分數做最終倉位保守取交集
+    if mkt_tot < 55 and cur["rg"] in ("BULL_ATTACK", "CONSOLIDATION"):
+        risk_alerts.append({
+            "level": "warn", "tag": "V21 總分防禦覆核",
+            "title": f"大盤 V21 綜合得分僅 {mkt_tot} 分（偏弱），強制下修倉位上限",
+            "detail": "雖單日反彈或站均線，但綜合籌碼、美債殖利率與市場廣度仍偏弱，實戰總倉位建議不超過 30%～45%。"
+        })
+
+    cur_stat = next((x for x in regime_stats if x["key"] == cur["rg"]), regime_stats[0])
+    recent_20 = [
+        {"dt": s["dt"], "c": s["c"], "rg": s["rg"], "b20": s["b20"], "abv20": s["abv20Pct"]}
+        for s in daily_states[-20:]
+    ]
+
+    return {
+        "calibrated": True,
+        "version": "V21.8",
+        "tradeDate": trade_dt,
+        "windowStart": daily_states[0]["dt"],
+        "windowEnd": daily_states[-1]["dt"],
+        "tradingDays": total_days,
+        "breadthCoveredDays": sum(1 for s in daily_states if s["hasBreadth"]),
+        "current": {
+            **cur,
+            "regimeKey": cur["rg"],
+            "regimeName": cur_meta["name"],
+            "riskLevel": cur_meta["riskLevel"],
+            "riskLabel": cur_meta["riskLabel"],
+            "posCap": "30%～45%" if (mkt_tot < 55 and cur_meta["weight"] > 0.45) else cur_meta["posCap"],
+            "badgeCls": cur_meta["cls"],
+            "mktV21": mkt_tot,
+            "histWin20": cur_stat["win20"],
+            "histRet20": cur_stat["ret20"],
+            "histAvgDd20": cur_stat["avgDd20"],
+        },
+        "riskAlerts": risk_alerts,
+        "regimeStats": regime_stats,
+        "strategyVsBuyHold": {
+            "buyHold": bh_perf,
+            "v21Regime": st_perf,
+            "drawdownSavedPct": dd_saved,
+            "volReducedPct": round(bh_perf["annVol"] - st_perf["annVol"], 1),
+        },
+        "equityCurve": curve_pts,
+        "recent20": recent_20,
+    }
+
 def lbl(sc):
     if sc >= 90: return ("極強勢", "優先觀察突破")
     if sc >= 85: return ("強勢", "主升段候選")
@@ -974,7 +1342,7 @@ def main():
     }
     gsum, gfr = {}, {}
     for k, (lb, sym) in idx_meta.items():
-        rw = yf_ohlcv(sym, HISTORY_RANGE if k in ("TAIEX", "OTC") else "3mo", "1d")
+        rw = yf_ohlcv(sym, "3y" if k in ("TAIEX", "OTC") else "3mo", "1d")
         if len(rw) >= 2:
             gfr[k] = rw
             c, p = rw[-1][4], rw[-2][4]
@@ -1157,17 +1525,51 @@ def main():
             "fl": ii.get("f", 0.0), "tl": ii.get("t", 0.0), "il": ii.get("tot", 0.0), "mc": marg_m.get(c, 0.0), **tc_
         }
         tail = [{"t": r[0][:10], "o": round(r[1], 2), "h": round(r[2], 2), "l": round(r[3], 2), "c": round(r[4], 2), "v": int(r[5] // 1000)} for r in rw[-160:]]
-        return item, (c, tail)
+        # 計算該檔個股近 2 年逐日廣度與朱家泓多空標記（供大盤 2 年位階回測交叉參考）
+        br_marks = None
+        if sec["tp"] != "ETF" and len(rw) >= 65:
+            rcl = [r[4] for r in rw]
+            rm5, rm10, rm20, rm60 = sma(rcl, 5), sma(rcl, 10), sma(rcl, 20), sma(rcl, 60)
+            br_marks = []
+            for j in range(60, len(rw)):
+                cj, m5j, m10j, m20j, m60j = rcl[j], rm5[j], rm10[j], rm20[j], rm60[j]
+                m20p = rm20[j - 4]
+                if None in (m5j, m10j, m20j, m60j, m20p) or cj <= 0:
+                    continue
+                br_marks.append((
+                    rw[j][0][:10],
+                    1 if cj > m20j else 0,
+                    1 if cj > m60j else 0,
+                    1 if cj > rcl[j - 1] else 0,
+                    1 if (cj > m5j > m10j > m20j and m20j > m20p) else 0,
+                    1 if (cj < m5j < m10j < m20j and m20j < m20p) else 0,
+                ))
+        return item, (c, tail), br_marks
 
     stocks, done, tot_n = [], 0, len(secs)
+    breadth_hist = {}
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
         for f in as_completed([ex.submit(w_day, s) for s in secs]):
             done += 1
-            item, bar_pair = f.result()
-            if item:
-                stocks.append(item)
-                if bar_pair:
-                    daily_cache_mem[bar_pair[0]] = bar_pair[1]
+            res_w = f.result()
+            if not res_w or not res_w[0]:
+                continue
+            item, bar_pair, br_marks = res_w
+            stocks.append(item)
+            if bar_pair:
+                daily_cache_mem[bar_pair[0]] = bar_pair[1]
+            if br_marks:
+                for (dt_b, a20, a60, up_f, zb_f, zs_f) in br_marks:
+                    slot = breadth_hist.get(dt_b)
+                    if slot is None:
+                        breadth_hist[dt_b] = {"tot": 1, "abv20": a20, "abv60": a60, "up": up_f, "zb": zb_f, "zs": zs_f}
+                    else:
+                        slot["tot"] += 1
+                        slot["abv20"] += a20
+                        slot["abv60"] += a60
+                        slot["up"] += up_f
+                        slot["zb"] += zb_f
+                        slot["zs"] += zs_f
             if done % 250 == 0 or done == tot_n:
                 log(f"  ⏳ 進度：{done}/{tot_n} ({done / max(tot_n, 1) * 100:.0f}%)｜有效 {len(stocks)} 檔")
 
@@ -1349,6 +1751,12 @@ def main():
         if res.get("bars") and code not in k60_cache_mem:
             k60_cache_mem[code] = res["bars"]
     log(f"🏆 全市場 {dual_bt['sampleSize']} 檔近 3 個月回測完成（真實60分K {dual_bt['real60mCount']} 檔＋等效代理 {dual_bt['proxyCount']} 檔）！看漲最佳：乖離≤+{dual_bt['bestBull']['biasMax']}% / 量比≥{dual_bt['bestBull']['vrMin']}x（勝率{dual_bt['bestBull']['winRate']}%、PF {dual_bt['bestBull']['pf']}）｜看跌最佳：負乖離≥{dual_bt['bestBear']['biasMax']}% / 量比≥{dual_bt['bestBear']['vrMin']}x（勝率{dual_bt['bestBear']['winRate']}%、PF {dual_bt['bestBear']['pf']}）")
+    log("🧭 執行大盤 2 年位階回測 × 2,000 檔市場廣度與風險警示引擎...")
+    taiex_bt = run_taiex_2y_regime_backtest(tx_rw, gfr.get("OTC", []), breadth_hist, dual_bt, mkt_tot, trade_dt)
+    if taiex_bt.get("calibrated"):
+        _c_rg = taiex_bt["current"]
+        _svb = taiex_bt["strategyVsBuyHold"]
+        log(f"  ✅ 大盤 2 年位階回測完成（{taiex_bt['windowStart']} ～ {taiex_bt['windowEnd']}，共 {taiex_bt['tradingDays']} 交易日）｜目前位階：{_c_rg['regimeName']}（風險等級 {_c_rg['riskLevel']}/5，建議倉位 {_c_rg['posCap']}）｜位階控倉 MDD {_svb['v21Regime']['mdd']}% vs 死抱 {_svb['buyHold']['mdd']}%（少扛 {_svb['drawdownSavedPct']}% 回撤）")
 
     rs20 = sorted(liq, key=lambda x: (x["rs_rk"], x["v21"]), reverse=True)[:20]
     top10 = sorted(liq, key=lambda x: (x["b60"], x["v21"], x["rs_rk"]), reverse=True)[:10]
@@ -1440,8 +1848,9 @@ def main():
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
-        "version": "V21.7.1",
+        "version": "V21.8",
         "dualAlert": dual_bt,
+        "marketRegime": taiex_bt,
         "date": trade_dt,
         "generatedAt": f"{ts_now} (GitHub自動同步)",
         "sampleCount": len(stocks),
@@ -1487,11 +1896,13 @@ def main():
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.7.1 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.8 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
     with open(os.path.join(DATA_DIR, "dual_alert_backtest.json"), "w", encoding="utf-8") as f:
         json.dump(dual_bt, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(DATA_DIR, "taiex_regime_backtest.json"), "w", encoding="utf-8") as f:
+        json.dump(taiex_bt, f, ensure_ascii=False, indent=2)
 
     # 2. V21.3 kline_bundle.json: Include TAIEX & OTC real daily bars + Top20/Core daily & 60m real bars!
     bundle_codes = set([r["code"] for r in top10] + [r["code"] for r in rs20[:10]] + ["2330", "2317", "2454", "2308", "2303", "2382", "3711", "2412", "2597", "2610", "2618", "1303", "2881", "2882", "6614", "3023"])
@@ -1580,6 +1991,29 @@ def main():
         md.append(f"| 🚀 看漲 #{i} | ≤+{r['biasMax']}% | ≥{r['vrMin']}x | ≥+{r['slopeMin']}% | {r['slPct']}% | {r['trades']} | **{r['winRate']}%** | {r['avgRet']:+.2f}% | **{r['pf']}** |")
     for i, r in enumerate((dual_bt.get("bearTop5") or [])[:3], 1):
         md.append(f"| 🔻 看跌 #{i} | ≥{r['biasMax']}% | ≥{r['vrMin']}x | ≤{r['slopeMin']}% | {r['slPct']}% | {r['trades']} | **{r['winRate']}%** | {r['avgRet']:+.2f}% | **{r['pf']}** |")
+    if taiex_bt.get("calibrated"):
+        _cur = taiex_bt["current"]
+        _sv = taiex_bt["strategyVsBuyHold"]
+        md += [
+            f"\n## 17｜大盤 2 年位階回測 × 2,000 檔共振風險警示（{taiex_bt['windowStart']} ～ {taiex_bt['windowEnd']}）",
+            f"- **目前大盤位階判定**：**`{_cur['regimeName']}`**（風險等級 **`{_cur['riskLevel']}/5` — {_cur['riskLabel']}**｜建議總倉位上限 **`{_cur['posCap']}`**）。",
+            f"- **關鍵均線與 2,000 檔廣度**：收盤 `{_cur['c']:,.1f}`｜20MA `{_cur['m20']:,.0f}`（`{_cur['b20']:+.2f}%`）｜60MA `{_cur['m60']:,.0f}`（`{_cur['b60']:+.2f}%`）｜240MA 年線 `{_cur['m240']:,.0f}`（`{_cur['b240']:+.2f}%`）｜2,000 檔站上月線 **`{_cur['abv20Pct']}%`**。",
+            f"- **2 年動態控倉回測驗證（{taiex_bt['tradingDays']} 交易日）**：V21.8 位階控倉總報酬 **`{_sv['v21Regime']['totalRet']:+.2f}%`** / 最大回撤 MDD **`{_sv['v21Regime']['mdd']}%`** / Calmar **`{_sv['v21Regime']['calmar']}`** vs. 大盤滿倉死抱總報酬 `{_sv['buyHold']['totalRet']:+.2f}%` / MDD `{_sv['buyHold']['mdd']}%`（少扛 **`{_sv['drawdownSavedPct']}%`** 跌幅，年化波動降低 **`{_sv['volReducedPct']}%`**）。",
+            "\n### 2 年五大位階歷史統計（未來 5日 / 10日 / 20日大盤實測）\n",
+            "| 位階燈號 | 建議倉位 | 出現天數(占比) | 未來5日勝率/均報 | 未來10日勝率/均報 | 未來20日勝率/均報 | 20日均回撤/最壞 |",
+            "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
+        ]
+        for rs in taiex_bt.get("regimeStats", []):
+            md.append(
+                f"| {rs['name']} | {rs['posCap']} | {rs['days']}天 ({rs['pctDays']}%) | "
+                f"{rs['win5']}% / {rs['ret5']:+.2f}% | {rs['win10']}% / {rs['ret10']:+.2f}% | "
+                f"**{rs['win20']}%** / **{rs['ret20']:+.2f}%** | {rs['avgDd20']:.2f}% / {rs['worstDd20']:.2f}% |"
+            )
+        md.append("\n### 今日系統位階風險提醒")
+        for al in taiex_bt.get("riskAlerts", []):
+            ic = "🚨" if al["level"] == "danger" else ("⚠️" if al["level"] == "warn" else "✅")
+            md.append(f"- {ic} **[{al['tag']}] {al['title']}**：{al['detail']}")
+
     with open(os.path.join(DATA_DIR, "V21_最新每日報告.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
 
