@@ -510,82 +510,57 @@ def check_60m(tk):
     }
 
 
-def run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt):
+def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, max_stocks=2000, k60_budget_sec=210):
     """
-    V21.5 雙流共振（朱家泓日K × 60分K三刀流）50 檔近 3 個月多空網格回測與最佳提醒數值引擎
-    - 零前視偏誤（Zero Look-Ahead）：第 t 日收盤觸發，T+1 ~ T+5 追蹤出場，扣除台股雙邊成本 0.4425%
-    - 分層抽樣 50 檔跨產業高流動性代表股（強勢/中性/弱勢均衡覆蓋），避免單邊或倖存者偏誤
+    V21.6 雙流共振（朱家泓日K × 60分K三刀流）全市場 2,000 檔近 3 個月多空網格回測引擎
+    ================================================================================
+    1. 2,000 檔全市場樣本覆蓋：優先納全體普通股（依流動性排序），不足 2,000 檔則以高流動性 ETF 補足至 2,000 檔。
+    2. 兩階段無損加速漏斗：
+       - 第一階段：對全部 2,000 檔近 63 交易日（約 3 個月）執行嚴格零前視偏誤（Zero Look-Ahead）日K朱家泓多/空掃描，
+         只對近 3 個月「確實觸發過朱家泓日K多空架構」的個股抓取 60分K，避免浪費請求額度。
+       - 第二階段：在安全時間預算內（預設 210 秒）多執行緒抓取真實 60分K（20/60/240MA）驗證三刀流；
+         其餘標的以台股 4.5 根/日等比例換算之「日K等效三刀（5MA/13MA/53MA）」補齊，完整保留 2,000 檔樣本無遺漏。
+    3. 288 組多空參數網格（看漲 144 組＋看跌 144 組）＋ 單股 5 日反重疊冷卻（防止連續重複計分）＋ 實扣台股交易成本 0.4425%。
+    ================================================================================
     """
     COST_PCT = 0.4425
     HOLD_DAYS = 5
-    LOOKBACK_DAYS = 63
+    LOOKBACK_DAYS = 63  # 近 3 個月交易日
 
-    liq = [s for s in stocks if s.get("lots", 0) >= 500 and s.get("tp") != "ETF" and s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 95]
-    if len(liq) < 20:
-        liq = [s for s in stocks if s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 95]
-
-    core_priority = ["2330", "2317", "2454", "2308", "2382", "2412", "2597", "2610", "2618", "2881", "2882", "2603", "3023", "6614", "1477", "2891", "2303", "3711"]
-    liq_map = {s["code"]: s for s in liq}
-    picked, picked_set = [], set()
-    for c in core_priority:
-        if c in liq_map and c not in picked_set:
-            picked.append(liq_map[c])
-            picked_set.add(c)
-
-    liq_sorted = sorted(liq, key=lambda x: (x.get("v21", 50), x.get("lots", 0)), reverse=True)
-    n = len(liq_sorted)
-    buckets = [
-        (sorted(liq_sorted[:max(1, n // 3)], key=lambda x: x["lots"], reverse=True), 30),
-        (sorted(liq_sorted[n // 3: max(2, 2 * n // 3)], key=lambda x: x["lots"], reverse=True), 40),
-        (sorted(liq_sorted[max(2, 2 * n // 3):], key=lambda x: x["lots"], reverse=True), 50),
+    # 1. 建立最多 2,000 檔有效回測母體（普通股優先，不足由流動性高 ETF 補足）
+    valid_eq = [
+        s for s in stocks
+        if s.get("tp") != "ETF" and s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 95
     ]
-    for bkt, cap in buckets:
-        for s in bkt:
-            if len(picked) >= cap:
-                break
-            if s["code"] not in picked_set:
-                picked.append(s)
-                picked_set.add(s["code"])
-    picked = picked[:50]
+    valid_etf = [
+        s for s in stocks
+        if s.get("tp") == "ETF" and s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 95
+    ]
+    valid_eq.sort(key=lambda x: x.get("lots", 0), reverse=True)
+    valid_etf.sort(key=lambda x: x.get("lots", 0), reverse=True)
+    picked = (valid_eq + valid_etf)[:max_stocks]
 
-    need_60m = [s for s in picked if s["code"] not in k60_state_mem]
-    if need_60m:
-        with ThreadPoolExecutor(max_workers=8) as ex:
-            fm = {ex.submit(check_60m, s["tk"]): s for s in need_60m}
-            for f in as_completed(fm):
-                s = fm[f]
-                try:
-                    res = f.result()
-                    if res and res.get("daily_60m"):
-                        k60_state_mem[s["code"]] = res
-                except Exception:
-                    pass
-
-    bull_events, bear_events = [], []
+    # 2. 第一階段：對全部 2,000 檔跑日K朱家泓多/空掃描，記錄有觸發的標的與時間點
     start_dt_seen, end_dt_seen = "9999-99-99", "0000-00-00"
-    used_60m_cnt = 0
+    stock_candidates = {}  # code -> list of (t, zhu_dir, c, m5, m13, m20, m53, m20sl, vr, bars, ma20_arr)
 
     for s in picked:
         code = s["code"]
         bars = daily_cache_mem.get(code, [])
         if len(bars) < 95:
             continue
-        k60_info = k60_state_mem.get(code)
-        d60_map = k60_info.get("daily_60m", {}) if k60_info else {}
-        if d60_map:
-            used_60m_cnt += 1
-
         cl = [b["c"] for b in bars]
         hi = [b["h"] for b in bars]
         lo = [b["l"] for b in bars]
         vo = [b["v"] for b in bars]
         ma5 = sma(cl, 5)
         ma10 = sma(cl, 10)
+        ma13 = sma(cl, 13)  # 等效 60分K 60MA (60 / 4.5 ≈ 13.3 日)
         ma20 = sma(cl, 20)
-        ma60 = sma(cl, 60)
+        ma53 = sma(cl, 53)  # 等效 60分K 240MA (240 / 4.5 ≈ 53.3 日)
 
         end_idx = len(bars) - HOLD_DAYS - 1
-        start_idx = max(62, end_idx - LOOKBACK_DAYS)
+        start_idx = max(58, end_idx - LOOKBACK_DAYS)
         if start_idx >= end_idx:
             continue
 
@@ -594,11 +569,12 @@ def run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt):
         if bars[end_idx]["t"] > end_dt_seen:
             end_dt_seen = bars[end_idx]["t"]
 
+        hits = []
         for t in range(start_idx, end_idx + 1):
             c = cl[t]
-            m5, m10, m20, m60 = ma5[t], ma10[t], ma20[t], ma60[t]
+            m5, m10, m13, m20, m53 = ma5[t], ma10[t], ma13[t], ma20[t], ma53[t]
             m20p = ma20[t - 4]
-            if None in (m5, m10, m20, m60, m20p) or c <= 0 or m20 <= 0 or m20p <= 0:
+            if None in (m5, m10, m13, m20, m53, m20p) or c <= 0 or m20 <= 0 or m20p <= 0 or m5 <= 0:
                 continue
 
             m20sl = (m20 / m20p - 1.0) * 100.0
@@ -612,6 +588,60 @@ def run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt):
             if not zhu_bull and not zhu_bear:
                 continue
 
+            v5_avg = sum(vo[t - 5:t]) / 5.0
+            vr = round(vo[t] / v5_avg, 2) if v5_avg > 0 else 1.0
+            m5p, m13p, m53p = ma5[t - 1], ma13[t - 1], ma53[t - 1]
+            hits.append((
+                t, 1 if zhu_bull else -1, c, m5, m13, m20, m53,
+                m5p or m5, m13p or m13, m53p or m53, m20sl, vr
+            ))
+
+        if hits:
+            stock_candidates[code] = (s, bars, ma5, ma20, hits)
+
+    # 3. 第二階段：針對近 3 個月有觸發朱家泓日K架構的標的（依流動性排序），在安全預算時間內抓取真實 60分K
+    need_60m = [
+        v[0] for c, v in stock_candidates.items()
+        if c not in k60_state_mem
+    ]
+    need_60m.sort(key=lambda x: x.get("lots", 0), reverse=True)
+    if need_60m and k60_budget_sec > 0:
+        log(f"  ⏱️ 2,000 檔日K掃描完成（{len(stock_candidates)} 檔近3月曾觸發朱家泓架構），開始多執行緒抓取真實 60分K（預算 {k60_budget_sec} 秒）...")
+        t_bt0 = time.time()
+        batch_sz = 40
+        fetched_new = 0
+        for b_start in range(0, len(need_60m), batch_sz):
+            if time.time() - t_bt0 >= k60_budget_sec:
+                log(f"  ⚡ 已達 60分K 抓取時間上限（共完成 {len(k60_state_mem)} 檔真實 60分K），其餘自動以等比例 5/13/53MA 三刀代理補齊 2,000 檔回測。")
+                break
+            chunk = need_60m[b_start:b_start + batch_sz]
+            with ThreadPoolExecutor(max_workers=10) as ex:
+                fm = {ex.submit(check_60m, st["tk"]): st for st in chunk}
+                for f in as_completed(fm):
+                    st = fm[f]
+                    try:
+                        res = f.result()
+                        if res and res.get("daily_60m"):
+                            k60_state_mem[st["code"]] = res
+                            fetched_new += 1
+                    except Exception:
+                        pass
+            if (b_start + batch_sz) % 200 == 0:
+                log(f"    ⏳ 60分K 驗證進度：{min(b_start + batch_sz, len(need_60m))}/{len(need_60m)}（累計真實 60分K {len(k60_state_mem)} 檔｜耗時 {time.time() - t_bt0:.0f}s）")
+
+    # 4. 彙整全部 2,000 檔之雙流多頭與雙流空頭事件
+    bull_events, bear_events = [], []
+    real_60m_used, proxy_used = 0, 0
+
+    for code, (s, bars, ma5_arr, ma20_arr, hits) in stock_candidates.items():
+        k60_info = k60_state_mem.get(code)
+        d60_map = k60_info.get("daily_60m", {}) if k60_info else {}
+        if d60_map:
+            real_60m_used += 1
+        else:
+            proxy_used += 1
+
+        for (t, z_dir, c, m5, m13, m20, m53, m5p, m13p, m53p, m20sl, vr) in hits:
             dt_t = bars[t]["t"]
             st60 = d60_map.get(dt_t)
             if st60:
@@ -619,67 +649,91 @@ def run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt):
                 bias = st60["bias20"]
                 slope = st60["slope20"]
             else:
-                b60_dir = 1 if (c > m5 > m20 > m60 and m20sl > 0) else (-1 if (c < m5 < m20 < m60 and m20sl < 0) else 0)
-                bias = round((c / m20 - 1.0) * 100.0, 2)
-                slope = round(m20sl, 2)
+                # 嚴格等比例日K三刀流代理：5MA(短刀) / 13MA(中刀) / 53MA(長刀)
+                is_pb = (c > m5 > m13 > m53) and (m5 > m5p) and (m13 > m13p) and (m53 > m53p)
+                is_ps = (c < m5 < m13 < m53) and (m5 < m5p) and (m13 < m13p) and (m53 < m53p)
+                b60_dir = 1 if is_pb else (-1 if is_ps else 0)
+                bias = round((c / m5 - 1.0) * 100.0, 2)
+                slope = round((m5 / m5p - 1.0) * 100.0, 2) if m5p > 0 else round(m20sl, 2)
 
-            v5_avg = sum(vo[t - 5:t]) / 5.0
-            vr = round(vo[t] / v5_avg, 2) if v5_avg > 0 else 1.0
+            if z_dir == 1 and b60_dir != 1:
+                continue
+            if z_dir == -1 and b60_dir != -1:
+                continue
+
+            # 預先計算未來 HOLD_DAYS 逐日出場軌跡（加速 288 組網格評估）
             fwd = []
             for k in range(1, HOLD_DAYS + 1):
                 fb = bars[t + k]
                 f60 = d60_map.get(fb["t"])
-                fwd.append({
-                    "h": fb["h"], "l": fb["l"], "c": fb["c"],
-                    "m20_60": f60["m20"] if f60 else (ma20[t + k] or fb["c"])
-                })
+                ref_short_ma = f60["m20"] if f60 else (ma5_arr[t + k] or ma20_arr[t + k] or fb["c"])
+                fwd.append((fb["h"], fb["l"], fb["c"], ref_short_ma))
 
-            ev = {"code": code, "dt": dt_t, "entry": c, "bias": bias, "vr": vr, "slope": slope, "fwd": fwd}
-            if zhu_bull and b60_dir == 1:
+            ev = (code, t, c, bias, vr, slope, fwd)
+            if z_dir == 1:
                 bull_events.append(ev)
-            elif zhu_bear and b60_dir == -1:
+            else:
                 bear_events.append(ev)
 
+    # 5. 288 組多空網格尋優（單股 5 日反重疊冷卻＋實扣 0.4425% 台股成本）
     def eval_grid(events, direction):
-        grid_results = []
-        for bias_lim in (3.5, 5.0, 7.0):
-            for vr_min in (0.9, 1.2, 1.5):
-                for slope_min in (0.0, 0.3):
-                    for sl_pct in (3.0, 4.0):
-                        rets = []
-                        for ev in events:
-                            if direction == 1:
-                                if not (0 <= ev["bias"] <= bias_lim and ev["vr"] >= vr_min and ev["slope"] >= slope_min):
-                                    continue
-                                entry = ev["entry"]
-                                sl_px = entry * (1.0 - sl_pct / 100.0)
-                                exit_px = ev["fwd"][-1]["c"]
-                                for fb in ev["fwd"]:
-                                    if fb["l"] <= sl_px:
-                                        exit_px = sl_px
-                                        break
-                                    if fb["c"] < fb["m20_60"]:
-                                        exit_px = fb["c"]
-                                        break
-                                rets.append(((exit_px / entry) - 1.0) * 100.0 - COST_PCT)
-                            else:
-                                if not (-bias_lim <= ev["bias"] <= 0 and ev["vr"] >= vr_min and ev["slope"] <= -slope_min):
-                                    continue
-                                entry = ev["entry"]
-                                sl_px = entry * (1.0 + sl_pct / 100.0)
-                                exit_px = ev["fwd"][-1]["c"]
-                                for fb in ev["fwd"]:
-                                    if fb["h"] >= sl_px:
-                                        exit_px = sl_px
-                                        break
-                                    if fb["c"] > fb["m20_60"]:
-                                        exit_px = fb["c"]
-                                        break
-                                rets.append(((entry - exit_px) / entry) * 100.0 - COST_PCT)
+        # Pre-compute net return for each event under each sl_pct (3.0 / 4.0 / 5.0)
+        sl_opts = (3.0, 4.0, 5.0)
+        ev_rows = []
+        for (code, t, entry, bias, vr, slope, fwd) in events:
+            r_by_sl = {}
+            for sl_pct in sl_opts:
+                if direction == 1:
+                    sl_px = entry * (1.0 - sl_pct / 100.0)
+                    exit_px = fwd[-1][2]
+                    for (fh, fl, fc, fm20) in fwd:
+                        if fl <= sl_px:
+                            exit_px = sl_px
+                            break
+                        if fc < fm20:
+                            exit_px = fc
+                            break
+                    r_by_sl[sl_pct] = ((exit_px / entry) - 1.0) * 100.0 - COST_PCT
+                else:
+                    sl_px = entry * (1.0 + sl_pct / 100.0)
+                    exit_px = fwd[-1][2]
+                    for (fh, fl, fc, fm20) in fwd:
+                        if fh >= sl_px:
+                            exit_px = sl_px
+                            break
+                        if fc > fm20:
+                            exit_px = fc
+                            break
+                    r_by_sl[sl_pct] = ((entry - exit_px) / entry) * 100.0 - COST_PCT
+            ev_rows.append((code, t, bias, vr, slope, r_by_sl))
 
-                        cnt = len(rets)
-                        if cnt == 0:
+        grid_results = []
+        for bias_lim in (2.5, 3.5, 5.0, 7.0):
+            for vr_min in (0.9, 1.2, 1.5, 2.0):
+                for slope_min in (0.0, 0.3, 0.6):
+                    # Apply non-overlapping cooldown (HOLD_DAYS per stock) once per (bias, vr, slope)
+                    selected = []
+                    last_t = {}
+                    for row in ev_rows:
+                        code, t, bias, vr, slope, r_by_sl = row
+                        if direction == 1:
+                            if not (0.0 <= bias <= bias_lim and vr >= vr_min and slope >= slope_min):
+                                continue
+                        else:
+                            if not (-bias_lim <= bias <= 0.0 and vr >= vr_min and slope <= -slope_min):
+                                continue
+                        lt = last_t.get(code)
+                        if lt is not None and (t - lt) < HOLD_DAYS:
                             continue
+                        last_t[code] = t
+                        selected.append(r_by_sl)
+
+                    cnt = len(selected)
+                    if cnt == 0:
+                        continue
+
+                    for sl_pct in sl_opts:
+                        rets = [m[sl_pct] for m in selected]
                         wins = [x for x in rets if x > 0]
                         losses = [x for x in rets if x <= 0]
                         win_rate = round(len(wins) / cnt * 100.0, 1)
@@ -688,7 +742,7 @@ def run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt):
                         gross_loss = abs(sum(losses))
                         pf = round(gross_win / gross_loss, 2) if gross_loss > 0.001 else (9.99 if gross_win > 0 else 0.0)
                         max_loss = round(min(rets), 2)
-                        sample_bonus = min(1.0, cnt / 10.0)
+                        sample_bonus = min(1.0, cnt / 30.0)
                         obj = round((avg_ret * 2.2 + (min(pf, 4.0) - 1.0) * 1.8 + (win_rate - 50.0) * 0.06) * sample_bonus, 3)
                         grid_results.append({
                             "biasMax": bias_lim if direction == 1 else -bias_lim,
@@ -703,7 +757,12 @@ def run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt):
                             "score": obj,
                         })
 
-        valid = [g for g in grid_results if g["trades"] >= 6] or [g for g in grid_results if g["trades"] >= 2] or grid_results
+        valid = (
+            [g for g in grid_results if g["trades"] >= 30]
+            or [g for g in grid_results if g["trades"] >= 15]
+            or [g for g in grid_results if g["trades"] >= 6]
+            or grid_results
+        )
         valid.sort(key=lambda x: (x["score"], x["pf"], x["winRate"], x["trades"]), reverse=True)
         if valid:
             best = valid[0]
@@ -723,23 +782,26 @@ def run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt):
 
     return {
         "calibrated": True,
+        "version": "V21.6",
         "tradeDate": trade_dt,
         "windowStart": start_dt_seen if start_dt_seen != "9999-99-99" else trade_dt,
         "windowEnd": end_dt_seen if end_dt_seen != "0000-00-00" else trade_dt,
         "sampleSize": len(picked),
-        "real60mCount": used_60m_cnt,
+        "triggeredStocks": len(stock_candidates),
+        "real60mCount": real_60m_used,
+        "proxyCount": proxy_used,
+        "gridCombos": 288,
+        "cooldownDays": HOLD_DAYS,
         "holdDays": HOLD_DAYS,
         "costPct": COST_PCT,
         "bullTotalSignals": len(bull_events),
         "bearTotalSignals": len(bear_events),
-        "sampleCodes": [f"{s['code']} {s['name']}" for s in picked],
+        "sampleCodesPreview": [f"{s['code']} {s['name']}" for s in picked[:50]],
         "bestBull": {**best_bull, "v21Min": 58},
         "bestBear": {**best_bear, "v21Max": 45},
         "bullTop5": bull_top5,
         "bearTop5": bear_top5,
     }
-
-
 def lbl(sc):
     if sc >= 90: return ("極強勢", "優先觀察突破")
     if sc >= 85: return ("強勢", "主升段候選")
@@ -1145,8 +1207,8 @@ def main():
                 if res.get("bars"):
                     k60_cache_mem[s["code"]] = res["bars"]
 
-    log("🧪 執行雙流共振 50 檔個股近 3 個月多空網格回測，尋找最佳提醒數值...")
-    dual_bt = run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt)
+    log("🧪 執行雙流共振全市場 2,000 檔個股近 3 個月多空網格回測（288組參數），尋找最佳提醒數值...")
+    dual_bt = run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt)
     _smap = {s["code"]: s for s in stocks}
     for code, res in k60_state_mem.items():
         st = _smap.get(code)
@@ -1166,7 +1228,7 @@ def main():
             st["b60s"] = "⚠️ 整理待轉"
         if res.get("bars") and code not in k60_cache_mem:
             k60_cache_mem[code] = res["bars"]
-    log(f"🏆 50檔3月回測完成！看漲最佳：乖離≤+{dual_bt['bestBull']['biasMax']}% / 量比≥{dual_bt['bestBull']['vrMin']}x（勝率{dual_bt['bestBull']['winRate']}%、PF {dual_bt['bestBull']['pf']}）｜看跌最佳：負乖離≥{dual_bt['bestBear']['biasMax']}% / 量比≥{dual_bt['bestBear']['vrMin']}x（勝率{dual_bt['bestBear']['winRate']}%、PF {dual_bt['bestBear']['pf']}）")
+    log(f"🏆 全市場 {dual_bt['sampleSize']} 檔近 3 個月回測完成（真實60分K {dual_bt['real60mCount']} 檔＋等效代理 {dual_bt['proxyCount']} 檔）！看漲最佳：乖離≤+{dual_bt['bestBull']['biasMax']}% / 量比≥{dual_bt['bestBull']['vrMin']}x（勝率{dual_bt['bestBull']['winRate']}%、PF {dual_bt['bestBull']['pf']}）｜看跌最佳：負乖離≥{dual_bt['bestBear']['biasMax']}% / 量比≥{dual_bt['bestBear']['vrMin']}x（勝率{dual_bt['bestBear']['winRate']}%、PF {dual_bt['bestBear']['pf']}）")
 
     rs20 = sorted(liq, key=lambda x: (x["rs_rk"], x["v21"]), reverse=True)[:20]
     top10 = sorted(liq, key=lambda x: (x["b60"], x["v21"], x["rs_rk"]), reverse=True)[:10]
@@ -1258,7 +1320,7 @@ def main():
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
-        "version": "V21.5",
+        "version": "V21.6",
         "dualAlert": dual_bt,
         "date": trade_dt,
         "generatedAt": f"{ts_now} (GitHub自動同步)",
@@ -1305,7 +1367,7 @@ def main():
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.5 自動更新 {trade_dt}（同步率 {sync_rate}%｜含50檔3月回測）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.6 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
     with open(os.path.join(DATA_DIR, "dual_alert_backtest.json"), "w", encoding="utf-8") as f:
@@ -1384,11 +1446,17 @@ def main():
 
     bb_b, bb_s = dual_bt["bestBull"], dual_bt["bestBear"]
     md += [
-        "\n## 16｜雙流共振 50 檔近 3 個月回測與最佳多空提醒數值",
-        f"- **回測樣本**：`{dual_bt['sampleSize']}` 檔跨產業高流動性代表股（實測 60分K `{dual_bt['real60mCount']}` 檔）｜區間：`{dual_bt['windowStart']}` ～ `{dual_bt['windowEnd']}`｜持有上限 `{dual_bt['holdDays']}` 日｜已扣台股手續費與證交稅 `{dual_bt['costPct']}%`。",
-        f"- **🚀 看漲雙流共振最佳提醒數值**：乖離率 `0% ～ +{bb_b['biasMax']}%`、量比 `≥ {bb_b['vrMin']}x`、60分K 20MA 斜率 `≥ +{bb_b['slopeMin']}%`、停損 `{bb_b['slPct']}%`（近3月觸發 `{bb_b['trades']}` 次｜勝率 **`{bb_b['winRate']}%`**｜平均淨報酬 **`{bb_b['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_b['pf']}`**）。",
-        f"- **🔻 看跌雙流共振最佳提醒數值**：負乖離 `{bb_s['biasMax']}% ～ 0%`、破線量比 `≥ {bb_s['vrMin']}x`、60分K 20MA 斜率 `≤ {bb_s['slopeMin']}%`、反彈停損 `{bb_s['slPct']}%`（近3月觸發 `{bb_s['trades']}` 次｜勝率 **`{bb_s['winRate']}%`**｜平均淨報酬 **`{bb_s['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_s['pf']}`**）。",
+        f"\n## 16｜雙流共振全市場 {dual_bt['sampleSize']:,} 檔近 3 個月回測與最佳多空提醒數值",
+        f"- **回測規模**：全市場 **`{dual_bt['sampleSize']:,}` 檔**（近3月曾觸發朱家泓架構 `{dual_bt['triggeredStocks']:,}` 檔｜真實 60分K 驗證 `{dual_bt['real60mCount']:,}` 檔＋等比例 5/13/53MA 代理 `{dual_bt['proxyCount']:,}` 檔）｜區間：`{dual_bt['windowStart']}` ～ `{dual_bt['windowEnd']}`｜共測 **`{dual_bt['gridCombos']}` 組多空網格**｜單股 `{dual_bt['cooldownDays']}` 日反重疊冷卻｜已扣台股成本 `{dual_bt['costPct']}%`。",
+        f"- **🚀 看漲雙流共振最佳提醒數值**：乖離率 `0% ～ +{bb_b['biasMax']}%`、量比 `≥ {bb_b['vrMin']}x`、60分K 20MA 斜率 `≥ +{bb_b['slopeMin']}%`、停損 `{bb_b['slPct']}%`（近3月有效不重疊觸發 **`{bb_b['trades']}` 筆**｜勝率 **`{bb_b['winRate']}%`**｜單筆平均淨報酬 **`{bb_b['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_b['pf']}`**）。",
+        f"- **🔻 看跌雙流共振最佳提醒數值**：負乖離 `{bb_s['biasMax']}% ～ 0%`、破線量比 `≥ {bb_s['vrMin']}x`、60分K 20MA 斜率 `≤ {bb_s['slopeMin']}%`、反彈解除線 `{bb_s['slPct']}%`（近3月有效不重疊觸發 **`{bb_s['trades']}` 筆**｜勝率 **`{bb_s['winRate']}%`**｜單筆平均淨報酬 **`{bb_s['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_s['pf']}`**）。",
+        "\n| 方向/排名 | 乖離門檻 | 量比門檻 | 20MA斜率 | 停損線 | 有效筆數 | 勝率 | 均淨報酬 | 獲利因子(PF) |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
     ]
+    for i, r in enumerate((dual_bt.get("bullTop5") or [])[:3], 1):
+        md.append(f"| 🚀 看漲 #{i} | ≤+{r['biasMax']}% | ≥{r['vrMin']}x | ≥+{r['slopeMin']}% | {r['slPct']}% | {r['trades']} | **{r['winRate']}%** | {r['avgRet']:+.2f}% | **{r['pf']}** |")
+    for i, r in enumerate((dual_bt.get("bearTop5") or [])[:3], 1):
+        md.append(f"| 🔻 看跌 #{i} | ≥{r['biasMax']}% | ≥{r['vrMin']}x | ≤{r['slopeMin']}% | {r['slPct']}% | {r['trades']} | **{r['winRate']}%** | {r['avgRet']:+.2f}% | **{r['pf']}** |")
     with open(os.path.join(DATA_DIR, "V21_最新每日報告.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
 
