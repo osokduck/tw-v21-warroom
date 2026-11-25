@@ -250,7 +250,7 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
     <div class="brand">
       <div class="brand-logo">V21</div>
       <div style="min-width:0;">
-        <h1>台股戰情室 <span class="badge b-cyan" id="hdrVersion">V21.3</span></h1>
+        <h1>台股戰情室 <span class="badge b-cyan" id="hdrVersion">V21.3.1</span></h1>
         <div class="brand-sub" id="hdrMeta">載入中...</div>
       </div>
     </div>
@@ -280,6 +280,17 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
     </div>
 
     <div class="grid-kpi" id="kpiGrid"></div>
+
+    <div class="card" id="myWatchlistCard">
+      <div class="card-hdr">
+        <div class="card-title">⭐ 我的自選股 <span class="badge b-amber" id="ovWatchCnt">0 檔</span></div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input id="ovAddWatchInput" class="ctrl" style="width:130px;padding:4px 7px;font-size:11px;" placeholder="輸入代號/名稱..." list="allStockDatalist">
+          <button class="btn btn-primary btn-sm" id="btnOvAddWatch">＋ 加入</button>
+        </div>
+      </div>
+      <div class="tbl-wrap" id="ovWatchBox"></div>
+    </div>
 
     <div class="card">
       <div class="card-hdr">
@@ -447,7 +458,7 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
       </div>
       <!-- Multi-Group Watchlist Tabs -->
       <div class="filter-bar" id="wlGroupTabs" style="margin-bottom:6px;">
-        <button class="fchip active" data-wg="hold">💼 現有持股</button>
+        <button class="fchip active" data-wg="watch" id="klWatchTabBtn">⭐ 自選股 (2)</button>
         <button class="fchip" data-wg="dual">⚔️ 雙流觀察</button>
         <button class="fchip" data-wg="core">💎 核心權值</button>
       </div>
@@ -510,6 +521,7 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
       </div>
       <div class="filter-bar" id="quickFilterChips">
         <button class="fchip active" data-qf="all">全部</button>
+        <button class="fchip" data-qf="watch" id="scrWatchChip">⭐ 自選股 (2)</button>
         <button class="fchip" data-qf="dual">✅ 雙流共振</button>
         <button class="fchip" data-qf="lowbias">🎯 低乖離雙流</button>
         <button class="fchip" data-qf="blade">⚔️ 三刀多頭</button>
@@ -517,7 +529,6 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
         <button class="fchip" data-qf="v21_60">📊 V21≥60</button>
         <button class="fchip" data-qf="rs90">🚀 RS≥90</button>
         <button class="fchip" data-qf="gapup">⬆️ 未回補跳空</button>
-        <button class="fchip" data-qf="hold">💼 現有持股</button>
       </div>
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px;font-size:11.5px;" class="muted">
         <span id="scrMatchInfo"></span>
@@ -642,16 +653,17 @@ let allStocks = DEFAULT_STOCKS.slice();
 let stockMap = {};
 let customOhlcvMap = {}; // code -> real daily bars, code+"_60m" -> real 60m bars, TAIEX/OTC -> real index daily bars
 
-// Multi-group watchlists + Portfolio holdings (code -> entryCost)
+// Multi-group watchlists (watch = ⭐ 自選股) + optional entry cost map (holdings)
 let watchGroups = {
+  watch: ["2597", "2412"],
   dual: ["2597", "6614", "6199", "8415", "6782", "7765", "3023"],
   core: ["2330", "2454", "2317", "2308", "2382", "2412", "2610", "2618", "2881", "2882"]
 };
-let holdings = { "2597": 173.5, "2412": 162.5 }; // Default sample; user can edit/delete freely
+let holdings = { "2597": 173.5, "2412": 162.5 }; // 自選股選填成本價（設定即啟用 3% 停損預警）
 
 // UI State
 let activeTab = "overview";
-let activeWlGroup = "hold";
+let activeWlGroup = "watch";
 let currentCode = "2597";
 let currentTF = "60m";
 let currentSubInd = "vol";
@@ -762,31 +774,116 @@ function getStockP5(s) {
   return [m, +chip.toFixed(1), tech, mom, r];
 }
 
+function normCode(code) {
+  return String(code === undefined || code === null ? "" : code).trim();
+}
+function ensureWatchIntegrity() {
+  if (!watchGroups || typeof watchGroups !== "object") watchGroups = {};
+  if (!Array.isArray(watchGroups.watch)) watchGroups.watch = [];
+  if (!Array.isArray(watchGroups.dual)) watchGroups.dual = ["2597", "6614", "6199", "8415", "6782", "7765", "3023"];
+  if (!Array.isArray(watchGroups.core)) watchGroups.core = ["2330", "2454", "2317", "2308", "2382", "2412", "2610", "2618", "2881", "2882"];
+  if (!holdings || typeof holdings !== "object") holdings = {};
+  // Ensure every holding code is also present in watchGroups.watch & deduplicate
+  const seen = {};
+  const merged = [];
+  watchGroups.watch.concat(Object.keys(holdings)).forEach(c => {
+    const k = normCode(c);
+    if (k && !seen[k]) { seen[k] = true; merged.push(k); }
+  });
+  watchGroups.watch = merged;
+}
 function isWatched(code) {
-  return !!holdings[code] || watchGroups.dual.indexOf(code) >= 0 || watchGroups.core.indexOf(code) >= 0;
+  const k = normCode(code);
+  return Array.isArray(watchGroups.watch) && watchGroups.watch.indexOf(k) >= 0;
 }
 function saveUserPrefs() {
+  ensureWatchIntegrity();
   try {
     localStorage.setItem(LS_WATCH_GROUPS, JSON.stringify(watchGroups));
     localStorage.setItem(LS_HOLDINGS, JSON.stringify(holdings));
   } catch (e) {}
+  idbSet("userPrefs", { watchGroups: watchGroups, holdings: holdings });
 }
-function loadUserPrefs() {
+async function loadUserPrefs() {
+  let loaded = false;
   try {
     const wg = localStorage.getItem(LS_WATCH_GROUPS);
-    if (wg) watchGroups = JSON.parse(wg);
+    if (wg) {
+      const parsed = JSON.parse(wg);
+      if (parsed && typeof parsed === "object") {
+        watchGroups = Object.assign({}, watchGroups, parsed);
+        loaded = true;
+      }
+    }
     const hd = localStorage.getItem(LS_HOLDINGS);
-    if (hd) holdings = JSON.parse(hd);
+    if (hd) {
+      const parsedH = JSON.parse(hd);
+      if (parsedH && typeof parsedH === "object") holdings = parsedH;
+    }
+    // Migrate legacy V21.1 / V21.2 single watchlist if present
+    const legacy = localStorage.getItem("v21_watch");
+    if (legacy && (!watchGroups.watch || watchGroups.watch.length === 0)) {
+      const arr = JSON.parse(legacy);
+      if (Array.isArray(arr) && arr.length) watchGroups.watch = arr;
+    }
   } catch (e) {}
+  if (!loaded) {
+    const idbPrefs = await idbGet("userPrefs");
+    if (idbPrefs && idbPrefs.watchGroups) watchGroups = Object.assign({}, watchGroups, idbPrefs.watchGroups);
+    if (idbPrefs && idbPrefs.holdings) holdings = idbPrefs.holdings;
+  }
+  ensureWatchIntegrity();
+}
+function updateWatchCounters() {
+  ensureWatchIntegrity();
+  const cnt = watchGroups.watch.length;
+  const klBtn = document.getElementById("klWatchTabBtn");
+  if (klBtn) klBtn.textContent = `⭐ 自選股 (${cnt})`;
+  const scrBtn = document.getElementById("scrWatchChip");
+  if (scrBtn) scrBtn.textContent = `⭐ 自選股 (${cnt})`;
+  const ovCnt = document.getElementById("ovWatchCnt");
+  if (ovCnt) ovCnt.textContent = `${cnt} 檔`;
+}
+function toggleFavorite(code, autoSwitchToWatch = false) {
+  const k = normCode(code);
+  if (!k || k === "TAIEX" || k === "OTC") return;
+  ensureWatchIntegrity();
+  const ix = watchGroups.watch.indexOf(k);
+  const st = stockMap[k];
+  const label = st ? `${k} ${st.n}` : k;
+  if (ix >= 0) {
+    watchGroups.watch.splice(ix, 1);
+    if (holdings[k]) delete holdings[k];
+    toast(`已移出自選股：${label}`);
+  } else {
+    watchGroups.watch.unshift(k);
+    if (autoSwitchToWatch) {
+      activeWlGroup = "watch";
+      document.querySelectorAll("#wlGroupTabs .fchip").forEach(x => x.classList.toggle("active", x.dataset.wg === "watch"));
+    }
+    toast(`⭐ 已加入自選股：${label}`);
+  }
+  saveUserPrefs();
+  updateWatchCounters();
+  renderOverviewWatchlist();
+  renderPortfolioAlerts();
+  renderOverviewWatchlist();
+  renderQuickChips();
+  renderScreener();
+  if (activeTab === "kline") renderKlineView();
+  if (activeTab === "top10") renderTop10AndFlows();
 }
 
 function rebuildIndex() {
   stockMap = {};
-  allStocks.forEach(s => { stockMap[s.c] = s; });
+  allStocks.forEach(s => {
+    s.c = normCode(s.c);
+    stockMap[s.c] = s;
+  });
   const inds = Array.from(new Set(allStocks.map(s => s.i).filter(Boolean))).sort();
   document.getElementById("scrInd").innerHTML = '<option value="ALL">全部產業</option>' + inds.map(i => `<option value="${i}">${i}</option>`).join("");
   const dl = document.getElementById("allStockDatalist");
-  dl.innerHTML = '<option value="TAIEX 加權指數"><option value="OTC 櫃買指數">' + allStocks.slice(0, 700).map(s => `<option value="${s.c} ${s.n}">`).join("");
+  dl.innerHTML = '<option value="TAIEX 加權指數"><option value="OTC 櫃買指數">' + allStocks.map(s => `<option value="${s.c} ${s.n}">`).join("");
 }
 
 // ==================== TAB NAVIGATION ====================
@@ -818,10 +915,50 @@ function renderPortfolioAlerts() {
   });
   if (alerts.length) {
     box.style.display = "flex";
-    box.innerHTML = `<div style="font-size:19px;">🚨</div><div><strong>現有持股 3% 停損預警（${alerts.length} 檔觸發）</strong>：${alerts.join("｜")}</div>`;
+    box.innerHTML = `<div style="font-size:19px;">🚨</div><div><strong>自選股 3% 停損預警（${alerts.length} 檔觸發）</strong>：${alerts.join("｜")}</div>`;
   } else {
     box.style.display = "none";
   }
+}
+
+function renderOverviewWatchlist() {
+  const box = document.getElementById("ovWatchBox");
+  if (!box) return;
+  updateWatchCounters();
+  const list = watchGroups.watch.map(c => stockMap[normCode(c)]).filter(Boolean);
+  if (!list.length) {
+    box.innerHTML = `<div class="muted" style="padding:14px;text-align:center;font-size:12px;">尚無自選股，請在上方輸入代號加入，或在全市場篩選點 <strong>☆</strong> 收藏。</div>`;
+    return;
+  }
+  box.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th class="l">代號名稱</th><th>現價</th><th>漲跌%</th><th class="c">V21</th>
+          <th>法人(張)</th><th>3%停損</th><th>成本/損益</th><th class="c">移除</th>
+        </tr>
+      </thead>
+      <tbody>${list.map(s => {
+        const cost = Number(holdings[s.c] || 0);
+        let costHtml = '<span class="muted">未設</span>';
+        if (cost > 0) {
+          const ret = (s.p / cost - 1) * 100;
+          const slHit = s.p <= cost * 0.97;
+          costHtml = `${slHit ? '🚨' : ''}<span class="${chgCls(ret)}">${fmtSigned(ret,1,"%")}</span>`;
+        }
+        return `<tr class="clickable" onclick="openStockChart('${s.c}')">
+          <td class="l"><strong>${s.c}</strong> ${s.n}</td>
+          <td class="${chgCls(s.ch)}"><strong>${fmtNum(s.p)}</strong></td>
+          <td class="${chgCls(s.ch)}">${fmtSigned(s.ch,2,"%")}</td>
+          <td class="c"><span class="badge ${scoreTier(s.s).cls}">${s.s}</span></td>
+          <td class="${chgCls(s.il)}">${fmtSigned(s.il,0)}</td>
+          <td class="down">${fmtNum(s.sl)}</td>
+          <td>${costHtml}</td>
+          <td class="c" onclick="event.stopPropagation();toggleFavorite('${s.c}')" style="color:#94a3b8;font-weight:700;">✕</td>
+        </tr>`;
+      }).join("")}</tbody>
+    </table>
+  `;
 }
 
 function renderOverview() {
@@ -1249,24 +1386,32 @@ function calcSMA(arr, n) { const out = new Array(arr.length).fill(null); let s =
 function calcEMA(arr, sp) { const k = 2 / (sp + 1), out = [arr[0]]; for (let i = 1; i < arr.length; i++) out.push(arr[i] * k + out[i - 1] * (1 - k)); return out; }
 
 function renderQuickChips() {
+  updateWatchCounters();
   const idxChips = [
     `<button class="chip idx-chip ${currentCode === 'TAIEX' ? 'active' : ''}" onclick="openStockChart('TAIEX')">📊 加權 ${fmtSigned(appMeta.taiex.chg,1,"%")}</button>`,
     `<button class="chip idx-chip ${currentCode === 'OTC' ? 'active' : ''}" onclick="openStockChart('OTC')">📊 櫃買 ${fmtSigned(appMeta.otc.chg,1,"%")}</button>`
   ];
   let list = [];
-  if (activeWlGroup === "hold") list = Object.keys(holdings);
+  if (activeWlGroup === "watch") list = watchGroups.watch;
   else if (activeWlGroup === "dual") list = watchGroups.dual;
   else list = watchGroups.core;
 
-  const chips = list.filter(c => stockMap[c]).map(c => {
+  const chips = list.map(c => normCode(c)).filter(c => !!stockMap[c]).map(c => {
     const s = stockMap[c];
     let tag = "";
-    if (activeWlGroup === "hold" && holdings[c]) {
-      const slHit = s.p <= holdings[c] * 0.97;
-      tag = slHit ? "🚨 " : "💼 ";
+    if (activeWlGroup === "watch") {
+      if (holdings[c]) {
+        const slHit = s.p <= Number(holdings[c]) * 0.97;
+        tag = slHit ? "🚨 " : "★ ";
+      } else {
+        tag = "★ ";
+      }
     }
     return `<button class="chip ${c === currentCode ? 'active' : ''}" onclick="openStockChart('${c}')">${tag}${s.c} ${s.n} <span class="${chgCls(s.ch)}">${fmtSigned(s.ch,1,"%")}</span></button>`;
   });
+  if (activeWlGroup === "watch" && chips.length === 0) {
+    chips.push(`<span class="muted" style="font-size:11.5px;padding:5px 6px;">尚無自選股，請按上方「⭐ 加入自選」</span>`);
+  }
   document.getElementById("quickStockChips").innerHTML = idxChips.concat(chips).join("");
 }
 
@@ -1280,7 +1425,15 @@ function renderKlineView() {
   document.getElementById("klTitle").textContent = `${s.c} ${s.n}`;
   document.getElementById("klPriceBadge").innerHTML = `<span class="${chgCls(s.ch)}">${fmtNum(s.p)} (${fmtSigned(s.ch,2,"%")})</span>`;
   document.getElementById("klSubBadge").innerHTML = `<span class="badge ${tier.cls}">V21 ${s.s}</span> <span class="badge b-muted">${s.i}</span>`;
-  document.getElementById("btnToggleWatch").textContent = isWatched(s.c) ? "★ 已收藏" : "⭐ 收藏";
+  const bwBtn = document.getElementById("btnToggleWatch");
+  if (s.isIndex) { bwBtn.style.display = "none"; }
+  else {
+    bwBtn.style.display = "inline-flex";
+    const fav = isWatched(s.c);
+    bwBtn.textContent = fav ? "★ 已在自選" : "⭐ 加入自選";
+    bwBtn.style.borderColor = fav ? "#facc15" : "var(--border)";
+    bwBtn.style.color = fav ? "#fde047" : "var(--text)";
+  }
 
   const hasReal = (currentTF === "60m" && !!customOhlcvMap[s.c + "_60m"]) || (currentTF !== "60m" && !!customOhlcvMap[s.c]);
   document.getElementById("klineDataOrigin").textContent = hasReal
@@ -1349,13 +1502,13 @@ function renderDiagCard(s) {
       }).join("")}
     </div>
 
-    <!-- Holding Cost & 3% SL Monitor -->
+    <!-- Watchlist Entry Cost & 3% SL Monitor -->
     <div style="background:var(--panel2);padding:9px;border-radius:9px;margin-bottom:9px;font-size:11.5px;">
-      <div style="font-weight:800;margin-bottom:5px;">💼 我的持股成本追蹤（破3%首頁亮紅燈）</div>
+      <div style="font-weight:800;margin-bottom:5px;">⭐ 自選股成本追蹤（選填，破3%首頁亮紅燈）</div>
       <div style="display:flex;gap:5px;align-items:center;">
         <input id="holdCostInput" type="number" step="0.1" class="ctrl" style="flex:1;" placeholder="輸入買進均價..." value="${myCost}">
-        <button class="btn btn-primary btn-sm" id="btnSaveHolding">儲存持股</button>
-        ${myCost ? '<button class="btn btn-danger btn-sm" id="btnDelHolding">移除</button>' : ''}
+        <button class="btn btn-primary btn-sm" id="btnSaveHolding">存成本</button>
+        ${myCost ? '<button class="btn btn-danger btn-sm" id="btnDelHolding">清成本</button>' : ''}
       </div>
       ${myCost ? `<div style="margin-top:5px;">目前損益：<strong class="${chgCls(s.p - myCost)}">${fmtSigned((s.p / myCost - 1) * 100, 2, "%")}</strong>｜成本3%停損：<strong class="down">${(myCost * 0.97).toFixed(2)}</strong></div>` : ''}
     </div>
@@ -1398,15 +1551,17 @@ function renderDiagCard(s) {
   document.getElementById("btnSaveHolding").addEventListener("click", () => {
     const v = parseFloat(document.getElementById("holdCostInput").value);
     if (!v || v <= 0) { toast("請輸入有效買進成本價"); return; }
-    holdings[s.c] = v; saveUserPrefs();
-    renderPortfolioAlerts(); renderQuickChips(); renderDiagCard(s);
-    toast(`💼 已將 ${s.c} ${s.n} 加入現有持股（成本 ${v}）`);
+    holdings[s.c] = v;
+    if (watchGroups.watch.indexOf(s.c) < 0) watchGroups.watch.unshift(s.c);
+    saveUserPrefs();
+    renderOverviewWatchlist(); renderPortfolioAlerts(); renderQuickChips(); renderScreener(); renderDiagCard(s);
+    toast(`⭐ 已加入自選股並記錄成本 ${v}：${s.c} ${s.n}`);
   });
   const delBtn = document.getElementById("btnDelHolding");
   if (delBtn) delBtn.addEventListener("click", () => {
     delete holdings[s.c]; saveUserPrefs();
-    renderPortfolioAlerts(); renderQuickChips(); renderDiagCard(s);
-    toast(`已移出現有持股：${s.c}`);
+    renderOverviewWatchlist(); renderPortfolioAlerts(); renderQuickChips(); renderDiagCard(s);
+    toast(`已清除成本價：${s.c}（仍保留於自選股）`);
   });
 }
 
@@ -1628,13 +1783,22 @@ function drawKlineCanvas() {
   document.getElementById("klineSearch").addEventListener("keydown", e => { if (e.key === "Enter") goStock(); });
 
   document.getElementById("btnToggleWatch").addEventListener("click", () => {
-    if (currentCode === "TAIEX" || currentCode === "OTC") return;
-    const grp = activeWlGroup === "core" ? "core" : "dual";
-    const ix = watchGroups[grp].indexOf(currentCode);
-    if (ix >= 0) { watchGroups[grp].splice(ix, 1); toast(`已移出自選：${currentCode}`); }
-    else { watchGroups[grp].unshift(currentCode); toast(`⭐ 已加入自選：${currentCode}`); }
-    saveUserPrefs(); renderKlineView();
+    toggleFavorite(currentCode, true);
   });
+
+  // Overview quick-add favorite input
+  const ovAddFn = () => {
+    const inp = document.getElementById("ovAddWatchInput");
+    const q = inp.value.trim(); if (!q) return;
+    const tok = normCode(q.split(/\s+/)[0]);
+    const hit = stockMap[tok] || allStocks.find(s => s.c === q || s.n === q || s.n.indexOf(q) >= 0);
+    if (!hit) { toast("查無標的：" + q); return; }
+    if (isWatched(hit.c)) { toast(`${hit.c} ${hit.n} 已在自選股中`); inp.value = ""; return; }
+    toggleFavorite(hit.c, false);
+    inp.value = "";
+  };
+  document.getElementById("btnOvAddWatch").addEventListener("click", ovAddFn);
+  document.getElementById("ovAddWatchInput").addEventListener("keydown", e => { if (e.key === "Enter") ovAddFn(); });
 })();
 
 // ==================== TAB 5: FULL SCREENER ====================
@@ -1656,7 +1820,7 @@ function getFilteredStocks() {
     if (scrFilter === "v21_60" && s.s < 60) return false;
     if (scrFilter === "rs90" && s.rs < 90) return false;
     if (scrFilter === "gapup" && !(s.g && s.g.indexOf("未回補") >= 0)) return false;
-    if (scrFilter === "hold" && !holdings[s.c]) return false;
+    if (scrFilter === "watch" && !isWatched(s.c)) return false;
     return true;
   }).sort((a, b) => {
     const va = a[scrSortKey], vb = b[scrSortKey];
@@ -1687,9 +1851,7 @@ function renderScreener() {
   }).join("") || '<tr><td colspan="11" class="c muted" style="padding:18px;">查無符合條件標的</td></tr>';
 }
 function quickStar(code) {
-  const ix = watchGroups.dual.indexOf(code);
-  if (ix >= 0) watchGroups.dual.splice(ix, 1); else watchGroups.dual.unshift(code);
-  saveUserPrefs(); renderScreener();
+  toggleFavorite(code, false);
 }
 ["scrSearch", "scrMkt", "scrInd"].forEach(id => document.getElementById(id).addEventListener("input", () => { scrPage = 1; renderScreener(); }));
 document.querySelectorAll("#quickFilterChips .fchip").forEach(b => b.addEventListener("click", () => {
@@ -1898,7 +2060,7 @@ if ("serviceWorker" in navigator && IS_HTTP_SITE) {
 
 // Boot Sequence: Instant render -> IndexedDB restore -> Background GitHub Pages sync
 (async function boot() {
-  loadUserPrefs();
+  await loadUserPrefs();
   const cachedMeta = await idbGet("meta");
   const cachedStocks = await idbGet("stocks");
   const cachedKline = await idbGet("klineBundle");
