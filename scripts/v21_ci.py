@@ -1,16 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-V21.2 GitHub Actions 雲端全自動盤後更新引擎（純 Python 內建、零外部套件依賴）
+V21.3 GitHub Actions 雲端全自動盤後更新引擎（純 Python 內建、零外部套件依賴）
 ================================================================================
-專為 GitHub Pages + GitHub Actions 設計：
-1. 自動讀取 data/macro_config.json（可直接在 GitHub 網頁修改每月景氣/PMI/利率）。
-2. 全市場 2,140+ 檔零誤差對齊（TWSE MI_INDEX / STOCK_DAY_ALL / MI_5MINS_HIST / FMTQIK + TPEx + TAIFEX + Yahoo）。
-3. 執行完畢後自動輸出至 data/ 目錄供 GitHub Pages 同網域免 CORS 直接讀取：
-   - data/v21_latest.json        （全站大盤、20大指標、2,140+檔評分）
-   - data/kline_bundle.json      （大盤、TOP20 與核心權值股之真實日K與60分K，讓網頁直出真實K棒）
-   - data/V21_最新每日報告.md      （15項固定戰情報告，供 NotebookLM 匯入）
-   - data/V21_全市場評分_最新.csv  （全市場評分表，含 dt 日期校驗欄）
-   - data/v21_hist.json          （逐日大盤分數與 TOP3 實績回測紀錄）
+V21.3 升級項目：
+1. 【大盤＋個股真實 K 線整合包】data/kline_bundle.json 新增 TAIEX（加權指數）與 OTC（櫃買指數）
+   近 260 日真實日 K，並收錄 TOP10、RS 前 10 與核心權值股之真實日 K（160根）與 60分K（180根）。
+2. 【全市場個股五構面得分拆解】每檔個股額外輸出 p5=[宏觀,籌碼,技術,主升基本,風控]、
+   月線 ma20、量比 vr 與融資增減 mc，支援前端自動偵測籌碼背離與短線乖離過熱警訊。
+3. 【30日大盤趨勢歷史曲線】自動累積並輸出近 60 個交易日之大盤 V21 總分、加權指數與站上 20MA 比例。
+4. 【TAIFEX 外資期貨斷檔自動回溯】若非盤後時段或期交所表單延遲，自動承接最近有效交易日淨未平倉並標註日期。
 ================================================================================
 """
 import csv, json, math, os, re, ssl, sys, time, urllib.parse, urllib.request
@@ -22,7 +20,7 @@ NOW_TW = datetime.now(TZ_TW)
 TODAY = NOW_TW.strftime("%Y-%m-%d")
 
 HISTORY_RANGE = "2y"
-MAX_WORKERS = 16  # GitHub Actions Linux 雲端高速併發
+MAX_WORKERS = 16
 MIN_VOL_LOTS = 500
 TOP_60M_LIMIT = 50
 MAX_STOCKS = None
@@ -50,8 +48,7 @@ def load_macro():
     if os.path.exists(p):
         try:
             with open(p, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-                return {**DEFAULT_MACRO, **cfg}
+                return {**DEFAULT_MACRO, **json.load(f)}
         except Exception:
             pass
     return dict(DEFAULT_MACRO)
@@ -270,6 +267,10 @@ def patch_official_indices(gsum, gfr):
                     parsed.append((dt, op, hi, lo, cl, ch))
             if parsed:
                 parsed.sort(key=lambda x: x[0])
+                otc_hist = list(gfr.get("OTC", []))
+                for r in parsed:
+                    otc_hist = upsert_daily_bar(otc_hist, (r[0], r[1], r[2], r[3], r[4], 0.0), explicit_date=True)
+                gfr["OTC"] = otc_hist
                 dt, _, _, _, cl, ch = parsed[-1]
                 if ch is None and len(parsed) >= 2:
                     ch = cl - parsed[-2][4]
@@ -277,7 +278,6 @@ def patch_official_indices(gsum, gfr):
                 prev_cl = cl - ch
                 chg_pct = (ch / prev_cl * 100.0) if prev_cl > 0 else 0.0
                 gsum["OTC"] = {"lb": "櫃買指數", "sym": "TPEx官方", "dt": dt, "c": round(cl, 2), "chg": round(chg_pct, 2)}
-                gfr["OTC"] = [(r[0], r[1], r[2], r[3], r[4], 0.0) for r in parsed]
                 if not official_dt:
                     official_dt = dt
                 log(f"  🔧 官方校正櫃買指數：{cl:,.2f}（{chg_pct:+.2f}%，基準日 {dt}）")
@@ -510,9 +510,19 @@ def main():
     t0 = time.time()
     MACRO = load_macro()
     log("==================================================")
-    log("🚀 V21.2 GitHub Actions 雲端全自動盤後更新引擎啟動！")
+    log("🚀 V21.3 GitHub Actions 雲端全自動盤後更新引擎啟動！")
     log(f"🕒 台灣時間：{NOW_TW.strftime('%Y-%m-%d %H:%M:%S')}")
     log("==================================================")
+
+    # 讀取歷史紀錄檔（含 TAIFEX 備援）
+    hf = os.path.join(DATA_DIR, "v21_hist.json")
+    ph = {}
+    if os.path.exists(hf):
+        try:
+            with open(hf, "r", encoding="utf-8") as f:
+                ph = json.load(f)
+        except Exception:
+            ph = {}
 
     log("📡 [1/6] 抓取美股、美債10Y、匯率、加權與櫃買指數（官方 OHLCV 校準）...")
     idx_meta = {
@@ -668,6 +678,12 @@ def main():
 
     tf = get_json("https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate", 12)
     tx_oi = parse_taifex_foreign_tx(tf)
+    tx_oi_cached = False
+    if tx_oi:
+        ph["_last_taifex"] = tx_oi
+    elif isinstance(ph.get("_last_taifex"), dict) and ph["_last_taifex"].get("net") is not None:
+        tx_oi = ph["_last_taifex"]
+        tx_oi_cached = True
 
     if MAX_STOCKS:
         secs = secs[:MAX_STOCKS]
@@ -681,7 +697,7 @@ def main():
             tx_ret[n] = (tc[-1] / tc[-1 - n] - 1.0) * 100.0
 
     log(f"📥 [3/6] 雲端高速抓取 {len(secs)} 檔日K並強制校準官方收盤（{trade_dt}）...")
-    daily_cache_mem = {}  # Keep recent bars for top/core stocks to build kline_bundle.json
+    daily_cache_mem = {}
 
     def w_day(sec):
         c, tk = sec["code"], sec["tk"]
@@ -699,7 +715,7 @@ def main():
             "ind": ri.get("ind", "ETF" if sec["tp"] == "ETF" else "其他"), "pe": pe_m.get(c), "yoy": ri.get("yoy"),
             "fl": ii.get("f", 0.0), "tl": ii.get("t", 0.0), "il": ii.get("tot", 0.0), "mc": marg_m.get(c, 0.0), **tc_
         }
-        tail = [{"t": r[0][:10], "o": round(r[1], 2), "h": round(r[2], 2), "l": round(r[3], 2), "c": round(r[4], 2), "v": int(r[5] // 1000)} for r in rw[-150:]]
+        tail = [{"t": r[0][:10], "o": round(r[1], 2), "h": round(r[2], 2), "l": round(r[3], 2), "c": round(r[4], 2), "v": int(r[5] // 1000)} for r in rw[-160:]]
         return item, (c, tail)
 
     stocks, done, tot_n = [], 0, len(secs)
@@ -729,7 +745,7 @@ def main():
         if abs(est_tot) > 0.1 or abs(est_f) > 0.1:
             m_inst["tpex"] = {"f": round(est_f, 2), "t": round(est_t, 2), "tot": round(est_tot, 2), "est": True}
 
-    log(f"🧮 [4/6] 計算全市場 RS 百分位與 V21 100分制評分...")
+    log(f"🧮 [4/6] 計算全市場 RS 百分位與 V21 五構面評分...")
     pct_rank(stocks, "rs_raw", "rs_rk", 99.0)
     for s in stocks:
         s["rs_sc"] = round(s["rs_rk"] / 99.0 * 7.0, 2)
@@ -771,7 +787,8 @@ def main():
     if noi is None:
         ms["07"], mn["07"] = (5, 2.5), "TAIFEX尚未更新"
     else:
-        ms["07"], mn["07"] = (5, 4.5 if noi > 0 else (3.5 if noi > -20000 else (2.5 if noi > -45000 else 1.5))), f"外資台指期淨未平倉{noi:,}口（多{tx_oi.get('l',0):,}/空{tx_oi.get('s',0):,}）"
+        c_tag = f"（延續 {tx_oi.get('dt')}）" if tx_oi_cached else f"（{tx_oi.get('dt')}）"
+        ms["07"], mn["07"] = (5, 4.5 if noi > 0 else (3.5 if noi > -20000 else (2.5 if noi > -45000 else 1.5))), f"外資台指期淨未平倉{noi:,}口{c_tag}"
     tmc = sum(marg_m.values())
     ms["08"], mn["08"] = (5, 4.2 if (txch > 0 and tmc < 0) else (3.2 if abs(tmc) < 50000 else 2.2)), f"全市場個股融資淨變動{tmc:+,.0f}張"
     bb_cnt = sum(1 for s in stocks if s["fl"] > 0 and s["tl"] > 0)
@@ -804,7 +821,9 @@ def main():
     ms["19"], mn["19"] = (7, round(min(7.0, max(2.5, yp / 100.0 * 7.5)), 1)), f"月營收YoY正成長占比{yp}%"
     ms["20"], mn["20"] = (4, round(txt["r_sc"], 1) if txt else 2.0), (f"年化波動{txt['avol']}%,MDD {txt['mdd']}%" if txt else "中性")
     mkt_tot = round(sum(v[1] for v in ms.values()), 1)
-    base26 = sum(ms[k][1] for k in ("01", "02", "03", "04", "05", "07"))
+
+    macro_15 = round(sum(ms[k][1] for k in ("01", "02", "03", "04")), 1)
+    chip_base = ms["05"][1] + ms["07"][1]
 
     for r in stocks:
         s6 = 6.8 if (r["fl"] > 0 and r["tl"] > 0 and r["il"] >= 500) else (5.8 if (r["fl"] > 0 and r["tl"] > 0) else (5.2 if r["il"] > 300 else (4.2 if r["il"] > 0 else (1.2 if r["il"] < -500 else 3.0))))
@@ -820,7 +839,13 @@ def main():
         elif r.get("pe") is not None and 25 < r["pe"] <= 45:
             s19 += 0.8
         s19 = max(0.5, min(7.0, s19))
-        r["v21"] = round(min(100.0, max(0.0, base26 + s6 + s8 + s9 + s10 + r["rs_sc"] + r["ma_sc"] + r["macd_sc"] + r["kd_sc"] + r["bb_sc"] + r["v_sc"] + r["gap_sc"] + r["pat_sc"] + s19 + r["r_sc"])), 1)
+
+        p_chip = round(min(36.0, chip_base + s6 + s8 + s9 + s10), 1)
+        p_tech = round(min(24.0, r["rs_sc"] + r["ma_sc"] + r["macd_sc"] + r["kd_sc"] + r["bb_sc"]), 1)
+        p_mom = round(min(21.0, r["v_sc"] + r["gap_sc"] + r["pat_sc"] + s19), 1)
+        p_risk = round(min(4.0, r["r_sc"]), 1)
+        r["p5"] = [macro_15, p_chip, p_tech, p_mom, p_risk]
+        r["v21"] = round(min(100.0, max(0.0, sum(r["p5"]))), 1)
         r["b60"] = False
         r["b60s"] = "未掃描"
         r["bm"] = None
@@ -842,7 +867,8 @@ def main():
                     s["b60"] = True
                     s["b60s"] = f"✅ 三刀多頭({res['m20']}/{res['m60']}/{res['m240']})"
                     s["bm"] = [res["m20"], res["m60"], res["m240"]]
-                    s["v21"] = round(min(100.0, s["v21"] + 1.5), 1)
+                    s["p5"][3] = round(min(21.0, s["p5"][3] + 1.5), 1)
+                    s["v21"] = round(min(100.0, sum(s["p5"])), 1)
                 else:
                     s["b60s"] = "⚠️ 待轉強"
                 if res.get("bars"):
@@ -856,16 +882,8 @@ def main():
         top3 = top10[:3]
     gaps = sorted([s for s in liq if s["gap_sc"] >= 3.0], key=lambda x: (x["v21"], x["vr"]), reverse=True)[:10]
 
-    # 回測與歷史分數紀錄
-    hf = os.path.join(DATA_DIR, "v21_hist.json")
-    ph = {}
-    if os.path.exists(hf):
-        try:
-            with open(hf, "r", encoding="utf-8") as f:
-                ph = json.load(f)
-        except Exception:
-            ph = {}
-    pds = sorted([d for d in ph if d < trade_dt])
+    # 更新 30 日趨勢與回測紀錄
+    pds = sorted([d for d in ph if re.match(r"^\d{4}-\d{2}-\d{2}$", d) and d < trade_dt])
     prev_mkt_score = ph[pds[-1]].get("ms", mkt_tot) if pds else mkt_tot
     rev_l, bt_rows = [], []
     ref_dt = pds[-1] if pds else trade_dt
@@ -887,6 +905,7 @@ def main():
             rev_l.append(f"\n- 前日 TOP3 勝率：`{w}/{tc_}` ({w / tc_ * 100:.0f}%)")
     else:
         rev_l.append(f"- 交易日 `{trade_dt}` 建檔完成，次一交易日盤後自動回測 TOP3 實績勝率。")
+
     ph[trade_dt] = {
         "ms": mkt_tot, "taiex": txc, "above20ma": p20,
         "top3": [{"code": r["code"], "name": r["name"], "price": r["price"], "sl": r["sl"], "v21": r["v21"]} for r in top3]
@@ -894,15 +913,14 @@ def main():
     with open(hf, "w", encoding="utf-8") as f:
         json.dump(ph, f, ensure_ascii=False, indent=2)
 
-    # ==========================================================================
-    # [6/6] 產出 JSON (供 GitHub Pages 戰情室)、K線整合包、Markdown 報告與 CSV
-    # ==========================================================================
-    log("📝 [6/6] 正在輸出 GitHub Pages 自動同步 JSON、真實 K 線包與 15 項報告...")
+    hist_dates = sorted([d for d in ph if re.match(r"^\d{4}-\d{2}-\d{2}$", d)])[-60:]
+    history_series = [{"dt": d, "ms": ph[d].get("ms", 50.0), "taiex": ph[d].get("taiex", 0.0), "above20ma": ph[d].get("above20ma", 0.0)} for d in hist_dates]
+
+    log("📝 [6/6] 正在輸出 V21.3 JSON、大盤+個股真實 K 線包與 15 項報告...")
     st_m, act_m = lbl(mkt_tot)
     ts_now = NOW_TW.strftime("%Y-%m-%d %H:%M")
     pos = "70%～85%" if mkt_tot >= 80 else ("50%～65%" if mkt_tot >= 65 else "30%～45%")
 
-    # 1. Build v21_latest.json (exact schema for index.html)
     ind_grps = {
         "01": ("宏觀經濟", "景氣循環"), "02": ("宏觀經濟", "PMI"), "03": ("宏觀經濟", "Fed利率"), "04": ("宏觀經濟", "匯率資金"),
         "05": ("市場籌碼", "大盤與櫃買"), "06": ("市場籌碼", "三大法人"), "07": ("市場籌碼", "台指期外資"),
@@ -946,6 +964,7 @@ def main():
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
+        "version": "V21.3",
         "date": trade_dt,
         "generatedAt": f"{ts_now} (GitHub自動同步)",
         "sampleCount": len(stocks),
@@ -961,6 +980,7 @@ def main():
         "global": global_list,
         "macroNote": f"{MACRO['note']}｜景氣 {MACRO['ndc_score']} 分（{MACRO['ndc_signal']}）｜PMI {MACRO['pmi']}%｜Fed {MACRO['fed_rate']}%",
         "indicators": indicators_list,
+        "history": history_series,
         "top3": [{"code": r["code"], "name": r["name"], "vr": r["vr"], "margin": round(r["mc"])} for r in top3],
         "top10Codes": [r["code"] for r in top10],
         "top10Margin": {r["code"]: round(r["mc"]) for r in top10},
@@ -974,7 +994,7 @@ def main():
         "strategy": [
             f"建議總持股水位控制在 {pos}；開盤前 30 分鐘不市價追高。",
             f"大盤年線 240MA 參考位階約 {tx_ma240:,} 點，站上月線比例 {p20}%。",
-            "優先追蹤突破 TOP3 與主升段 TOP10，回測日內均價或 60分K 20MA（小藍短刀）止穩承接。",
+            "優先追蹤「低乖離雙流共振＋法人買超」標的，回測日內均價或 60分K 20MA（小藍短刀）止穩承接。",
             "所有部位嚴守朱家泓 3% 停損基準，破線立即減碼退場。"
         ]
     }
@@ -982,20 +1002,27 @@ def main():
     sorted_stocks = sorted(stocks, key=lambda x: x["v21"], reverse=True)
     web_stocks = [{
         "dt": r["dt"], "c": r["code"], "n": r["name"], "m": r["mkt"], "i": r["ind"],
-        "p": r["price"], "ch": r["chg"], "v": r["lots"], "rs": r["rs_rk"], "s": r["v21"],
+        "p": r["price"], "ch": r["chg"], "v": r["lots"], "vr": r["vr"], "rs": r["rs_rk"], "s": r["v21"],
+        "p5": r["p5"], "m20": r["ma20"], "mc": round(r["mc"]),
         "z": r["zhu"], "b": r["b60s"], "bm": r["bm"], "fl": r["fl"], "tl": r["tl"], "il": r["il"],
         "vw": r["vwap"], "sl": r["sl"], "t1": r["t1"], "t2": r["t2"], "g": r["gap_t"]
     } for r in sorted_stocks]
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"GitHub自動更新 {trade_dt}（同步率 {sync_rate}%）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.3 自動更新 {trade_dt}（同步率 {sync_rate}%）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
 
-    # 2. Build kline_bundle.json (Real historical daily + 60m K-lines for Top 20 + Core Weighted Stocks!)
-    bundle_codes = set([r["code"] for r in top10] + [r["code"] for r in rs20[:10]] + ["2330", "2317", "2454", "2308", "2303", "2382", "3711", "2412", "2597", "2610", "2618", "1303", "2881", "2882"])
-    kline_bundle = {"tradeDate": trade_dt, "daily": {}, "k60m": {}}
+    # 2. V21.3 kline_bundle.json: Include TAIEX & OTC real daily bars + Top20/Core daily & 60m real bars!
+    bundle_codes = set([r["code"] for r in top10] + [r["code"] for r in rs20[:10]] + ["2330", "2317", "2454", "2308", "2303", "2382", "3711", "2412", "2597", "2610", "2618", "1303", "2881", "2882", "6614", "3023"])
+    kline_bundle = {"tradeDate": trade_dt, "indices": {}, "daily": {}, "k60m": {}}
+    for ik in ("TAIEX", "OTC"):
+        if gfr.get(ik):
+            kline_bundle["indices"][ik] = [
+                {"t": r[0][:10], "o": round(r[1], 2), "h": round(r[2], 2), "l": round(r[3], 2), "c": round(r[4], 2), "v": int(r[5])}
+                for r in gfr[ik][-260:]
+            ]
     for c in bundle_codes:
         if c in daily_cache_mem:
             kline_bundle["daily"][c] = daily_cache_mem[c]
@@ -1004,11 +1031,11 @@ def main():
     with open(os.path.join(DATA_DIR, "kline_bundle.json"), "w", encoding="utf-8") as f:
         json.dump(kline_bundle, f, ensure_ascii=False, separators=(",", ":"))
 
-    # 3. Build 15-item Markdown Report for NotebookLM & CSV
+    # 3. Build 15-item Markdown Report & CSV
     inf = sorted(ist, key=lambda x: (x["achg"], x["il"]), reverse=True)[:6]
     outf = sorted(ist, key=lambda x: (x["achg"], x["il"]))[:6]
     md = [
-        f"# 台股二十大指標最終版（V21.2 雲端全自動版）每日量化戰情報告（{trade_dt}）",
+        f"# 台股二十大指標最終版（V21.3 雲端全自動版）每日量化戰情報告（{trade_dt}）",
         f"**行情基準日**：`{trade_dt}`（大盤與個股同步率 `{sync_rate}%`，✅ 0天誤差）｜**產出時間**：{ts_now}｜**有效樣本**：`{len(stocks)}` 檔｜**大盤 V21 總分**：**`{mkt_tot}/100`（{st_m}／{act_m}）**\n",
         "---", "## 1｜全球經濟與美股"
     ]
@@ -1061,13 +1088,13 @@ def main():
     with open(os.path.join(DATA_DIR, "V21_最新每日報告.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
 
-    flds = ["dt", "code", "name", "mkt", "ind", "price", "chg", "lots", "rs_rk", "v21", "zhu", "b60s", "fl", "tl", "il", "vwap", "sl", "t1", "t2", "gap_t"]
+    flds = ["dt", "code", "name", "mkt", "ind", "price", "chg", "lots", "vr", "rs_rk", "v21", "zhu", "b60s", "fl", "tl", "il", "mc", "vwap", "sl", "t1", "t2", "gap_t"]
     with open(os.path.join(DATA_DIR, "V21_全市場評分_最新.csv"), "w", encoding="utf-8-sig", newline="") as f:
         w = csv.DictWriter(f, fieldnames=flds, extrasaction="ignore")
         w.writeheader()
         w.writerows(sorted_stocks)
 
-    log(f"🎉 V21.2 雲端全自動更新完成！（耗時 {time.time() - t0:.1f} 秒｜{len(stocks)} 檔｜基準日 {trade_dt}｜大盤 V21 {mkt_tot}）")
+    log(f"🎉 V21.3 雲端全自動更新完成！（耗時 {time.time() - t0:.1f} 秒｜{len(stocks)} 檔｜基準日 {trade_dt}｜大盤 V21 {mkt_tot}）")
 
 
 if __name__ == "__main__":
