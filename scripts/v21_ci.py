@@ -512,21 +512,20 @@ def check_60m(tk):
 
 def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_rw=None, mkt_tot=50.0, max_stocks=2000, k60_budget_sec=210):
     """
-    V21.7 雙流共振（朱家泓日K × 60分K三刀流）全市場 2,000 檔近 3 個月「實戰微調」多空網格回測引擎
+    V21.7.1 雙流共振（朱家泓日K × 60分K三刀流）全市場 2,000 檔近 3 個月「實戰精準微調」回測引擎
     ================================================================================
-    V21.7 實戰微調四大升級（根據 V21.6 兩千檔真實回測診斷優化）：
-    1. 【大盤位階與 RS 逆勢強弱濾網】：引入零前視大盤 20MA 位階與個股 20 日超額報酬 (RS_20 = 個股20日漲幅 - 大盤20日漲幅)，
-       解決空頭盤勢中「假突破多頭陷阱」拉低勝率的痛點。
-    2. 【反洗盤緩衝出場 ＋ 延長多頭波段持有至 10 日】：多頭新增「60分K 20MA 緩衝 -1.5%」反洗盤出場與 10 日持有上限，
-       保留實測高達 2.7x 的盈虧比大波段；空頭則延續實測 PF 2.3~2.4 的 5 日急跌收割結構。
-    3. 【負期望值自動保護盾 (Circuit Breaker)】：若近 3 個月回測顯示多頭期望值 ≤ 0 或 PF < 1.0，自動啟動「空頭防禦濾網」
-       （RS ≥ 85 ＋ V21 ≥ 62 ＋ 法人買超 ≥ 0 ＋ 乖離 ≤ +4.5% ＋ 3% 停損），絕不盲目推送低勝率買訊。
-    4. 【三大市場位階動態參數矩陣】：依大盤 V21 總分自動匹配「🛡️ 空頭防禦 / ⚖️ 盤整震盪 / 🚀 多頭攻擊」實戰參數。
+    V21.7.1 兩大精準升級：
+    1. 【多空截止日獨立計算】：
+       - 看漲多頭波段保留 10 交易日結算（cutoff = len - 11），保留反洗盤 buf15 大波段盈虧比。
+       - 看跌空頭急跌獨立使用 5 交易日結算（cutoff = len - 6），不再被多頭切掉最新一週盤勢。
+    2. 【大盤 20MA 順風 / 逆風對照組 (bullByMarketRegime)】：
+       - 自動拆分「大盤站上月線 (tx_abv=True) 做多」vs.「大盤跌破月線 (tx_abv=False) 做多」
+         各自的觸發筆數、勝率、單筆均淨報與獲利因子 (PF)，精準驗證大盤翻多後的爆發力。
     ================================================================================
     """
     COST_PCT = 0.4425
-    HOLD_BULL = 10      # 多頭波段延長至 10 交易日，讓 2.7x 盈虧比充分奔跑
-    HOLD_BEAR = 5       # 空頭維持實測最強的 5 交易日急跌收割期
+    HOLD_BULL = 10      # 多頭波段持有上限：10 交易日
+    HOLD_BEAR = 5       # 空頭急跌持有上限：5 交易日
     LOOKBACK_DAYS = 63  # 近 3 個月交易日
 
     # 建立大盤零前視日期對照表（20日漲幅與大盤是否站上 20MA）
@@ -554,7 +553,8 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
     valid_etf.sort(key=lambda x: x.get("lots", 0), reverse=True)
     picked = (valid_eq + valid_etf)[:max_stocks]
 
-    start_dt_seen, end_dt_seen = "9999-99-99", "0000-00-00"
+    bull_start_seen, bull_end_seen = "9999-99-99", "0000-00-00"
+    bear_start_seen, bear_end_seen = "9999-99-99", "0000-00-00"
     stock_candidates = {}
 
     for s in picked:
@@ -572,18 +572,29 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
         ma20 = sma(cl, 20)
         ma53 = sma(cl, 53)
 
-        end_idx = len(bars) - HOLD_BULL - 1
-        start_idx = max(58, end_idx - LOOKBACK_DAYS)
-        if start_idx >= end_idx:
+        # 多空獨立窗口：多頭需預留 10 日結算、空頭僅需預留 5 日結算
+        end_bull = len(bars) - HOLD_BULL - 1
+        start_bull = max(58, end_bull - LOOKBACK_DAYS)
+        end_bear = len(bars) - HOLD_BEAR - 1
+        start_bear = max(58, end_bear - LOOKBACK_DAYS)
+
+        if start_bull >= end_bull or start_bear >= end_bear:
             continue
 
-        if bars[start_idx]["t"] < start_dt_seen:
-            start_dt_seen = bars[start_idx]["t"]
-        if bars[end_idx]["t"] > end_dt_seen:
-            end_dt_seen = bars[end_idx]["t"]
+        if bars[start_bull]["t"] < bull_start_seen:
+            bull_start_seen = bars[start_bull]["t"]
+        if bars[end_bull]["t"] > bull_end_seen:
+            bull_end_seen = bars[end_bull]["t"]
+        if bars[start_bear]["t"] < bear_start_seen:
+            bear_start_seen = bars[start_bear]["t"]
+        if bars[end_bear]["t"] > bear_end_seen:
+            bear_end_seen = bars[end_bear]["t"]
+
+        scan_start = min(start_bull, start_bear)
+        scan_end = max(end_bull, end_bear)
 
         hits = []
-        for t in range(start_idx, end_idx + 1):
+        for t in range(scan_start, scan_end + 1):
             c = cl[t]
             m5, m10, m13, m20, m53 = ma5[t], ma10[t], ma13[t], ma20[t], ma53[t]
             m20p = ma20[t - 4]
@@ -596,8 +607,8 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
             lh = max(hi[t - 9:t + 1]) < max(hi[t - 24:t - 9])
             ll = min(lo[t - 9:t + 1]) < min(lo[t - 24:t - 9])
 
-            zhu_bull = (c > m5 > m10 > m20) and (m20sl > 0) and hh and hl
-            zhu_bear = (c < m5 < m10 < m20) and (m20sl < 0) and lh and ll
+            zhu_bull = (start_bull <= t <= end_bull) and (c > m5 > m10 > m20) and (m20sl > 0) and hh and hl
+            zhu_bear = (start_bear <= t <= end_bear) and (c < m5 < m10 < m20) and (m20sl < 0) and lh and ll
             if not zhu_bull and not zhu_bear:
                 continue
 
@@ -605,7 +616,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
             vr = round(vo[t] / v5_avg, 2) if v5_avg > 0 else 1.0
             st_r20 = ((c / cl[t - 20]) - 1.0) * 100.0 if cl[t - 20] > 0 else 0.0
             tx_info = tx_map.get(bars[t]["t"], {"r20": 0.0, "above20": True})
-            rs_ex = round(st_r20 - tx_info["r20"], 2)  # 個股 20 日超額報酬 (領先大盤幅度)
+            rs_ex = round(st_r20 - tx_info["r20"], 2)
 
             m5p, m13p, m53p = ma5[t - 1], ma13[t - 1], ma53[t - 1]
             hits.append((
@@ -682,10 +693,25 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
             else:
                 bear_events.append(ev)
 
-    # 多頭網格尋優：加入 RS 超額報酬濾網 (0% / +5% / +10%) 與 反洗盤緩衝出場 (-1.5% / 日20MA)
+    def summarize_rets(rets):
+        cnt = len(rets)
+        if cnt == 0:
+            return {"trades": 0, "winRate": 0.0, "avgRet": 0.0, "pf": 0.0, "maxLoss": 0.0}
+        wins = [x for x in rets if x > 0]
+        losses = [x for x in rets if x <= 0]
+        gw, gl = sum(wins), abs(sum(losses))
+        return {
+            "trades": cnt,
+            "winRate": round(len(wins) / cnt * 100.0, 1),
+            "avgRet": round(sum(rets) / cnt, 2),
+            "pf": round(gw / gl, 2) if gl > 0.001 else (9.99 if gw > 0 else 0.0),
+            "maxLoss": round(min(rets), 2),
+        }
+
+    # 多頭網格尋優：含 RS 超額報酬濾網、反洗盤緩衝出場 (-1.5% / 日20MA) 與大盤20MA順逆風對照組
     def eval_bull_grid(events):
         sl_opts = (3.0, 4.0, 5.0)
-        exit_opts = ("buf15", "daily20")  # buf15: 60分K 20MA 下方1.5%緩衝; daily20: 日K 20MA 波段出場
+        exit_opts = ("buf15", "daily20")
         ev_rows = []
         for (code, t, entry, bias, vr, slope, rs_ex, tx_abv, fwd) in events:
             r_map = {}
@@ -720,22 +746,16 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
                             if lt is not None and (t - lt) < HOLD_BULL:
                                 continue
                             last_t[code] = t
-                            selected.append(r_map)
+                            selected.append((tx_abv, r_map))
                         cnt = len(selected)
                         if cnt == 0:
                             continue
                         for em in exit_opts:
                             for sl_pct in sl_opts:
-                                rets = [m[(em, sl_pct)] for m in selected]
-                                wins = [x for x in rets if x > 0]
-                                losses = [x for x in rets if x <= 0]
-                                win_rate = round(len(wins) / cnt * 100.0, 1)
-                                avg_ret = round(sum(rets) / cnt, 2)
-                                gw, gl = sum(wins), abs(sum(losses))
-                                pf = round(gw / gl, 2) if gl > 0.001 else (9.99 if gw > 0 else 0.0)
-                                max_loss = round(min(rets), 2)
+                                rets = [m[(em, sl_pct)] for (_, m) in selected]
+                                st = summarize_rets(rets)
                                 sample_bonus = min(1.0, cnt / 30.0)
-                                obj = round((avg_ret * 2.2 + (min(pf, 4.0) - 1.0) * 1.8 + (win_rate - 50.0) * 0.06) * sample_bonus, 3)
+                                obj = round((st["avgRet"] * 2.2 + (min(st["pf"], 4.0) - 1.0) * 1.8 + (st["winRate"] - 50.0) * 0.06) * sample_bonus, 3)
                                 grid_results.append({
                                     "biasMax": bias_lim,
                                     "vrMin": vr_min,
@@ -743,23 +763,45 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
                                     "rsExMin": rs_ex_min,
                                     "exitMode": em,
                                     "slPct": sl_pct,
-                                    "trades": cnt,
-                                    "winRate": win_rate,
-                                    "avgRet": avg_ret,
-                                    "pf": pf,
-                                    "maxLoss": max_loss,
+                                    **st,
                                     "score": obj,
                                 })
 
         valid = [g for g in grid_results if g["trades"] >= 30] or [g for g in grid_results if g["trades"] >= 10] or grid_results
         valid.sort(key=lambda x: (x["score"], x["pf"], x["winRate"], x["trades"]), reverse=True)
         best = valid[0] if valid else {
-            "biasMax": 4.5, "vrMin": 1.2, "slopeMin": 0.6, "rsExMin": 6.0, "exitMode": "buf15", "slPct": 3.0,
+            "biasMax": 4.5, "vrMin": 1.2, "slopeMin": 0.6, "rsExMin": 0.0, "exitMode": "buf15", "slPct": 3.0,
             "trades": 0, "winRate": 0.0, "avgRet": 0.0, "pf": 0.0, "maxLoss": 0.0, "score": 0.0, "fallback": True
         }
-        return best, valid[:5]
 
-    # 空頭網格尋優：保留 V21.6 實測高獲利因子 (PF 2.3~2.4) 的 5 日急跌模型
+        # 拆解最佳多頭參數在「大盤站上 20MA (順風)」vs.「大盤跌破 20MA (逆風)」的真實表現
+        abv_rets, blw_rets = [], []
+        last_abv, last_blw = {}, {}
+        em_b, sl_b = best.get("exitMode", "buf15"), best.get("slPct", 3.0)
+        for (code, t, bias, vr, slope, rs_ex, tx_abv, r_map) in ev_rows:
+            if not (0.0 <= bias <= best["biasMax"] and vr >= best["vrMin"] and slope >= best["slopeMin"] and rs_ex >= best.get("rsExMin", 0.0)):
+                continue
+            r_val = r_map.get((em_b, sl_b))
+            if r_val is None:
+                continue
+            if tx_abv:
+                lt = last_abv.get(code)
+                if lt is None or (t - lt) >= HOLD_BULL:
+                    last_abv[code] = t
+                    abv_rets.append(r_val)
+            else:
+                lt = last_blw.get(code)
+                if lt is None or (t - lt) >= HOLD_BULL:
+                    last_blw[code] = t
+                    blw_rets.append(r_val)
+
+        regime_split = {
+            "above20ma": summarize_rets(abv_rets),
+            "below20ma": summarize_rets(blw_rets),
+        }
+        return best, valid[:5], regime_split
+
+    # 空頭網格尋優：獨立採用 5 日結算窗口（覆蓋最新一週行情）
     def eval_bear_grid(events):
         sl_opts = (3.0, 4.0, 5.0)
         ev_rows = []
@@ -797,18 +839,12 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
                         continue
                     for sl_pct in sl_opts:
                         rets = [m[sl_pct] for m in selected]
-                        wins = [x for x in rets if x > 0]
-                        losses = [x for x in rets if x <= 0]
-                        win_rate = round(len(wins) / cnt * 100.0, 1)
-                        avg_ret = round(sum(rets) / cnt, 2)
-                        gw, gl = sum(wins), abs(sum(losses))
-                        pf = round(gw / gl, 2) if gl > 0.001 else (9.99 if gw > 0 else 0.0)
-                        max_loss = round(min(rets), 2)
+                        st = summarize_rets(rets)
                         sample_bonus = min(1.0, cnt / 30.0)
-                        obj = round((avg_ret * 2.2 + (min(pf, 4.0) - 1.0) * 1.8 + (win_rate - 50.0) * 0.06) * sample_bonus, 3)
+                        obj = round((st["avgRet"] * 2.2 + (min(st["pf"], 4.0) - 1.0) * 1.8 + (st["winRate"] - 50.0) * 0.06) * sample_bonus, 3)
                         grid_results.append({
                             "biasMax": -bias_lim, "vrMin": vr_min, "slopeMin": -slope_min, "slPct": sl_pct,
-                            "trades": cnt, "winRate": win_rate, "avgRet": avg_ret, "pf": pf, "maxLoss": max_loss, "score": obj,
+                            **st, "score": obj,
                         })
 
         valid = [g for g in grid_results if g["trades"] >= 30] or [g for g in grid_results if g["trades"] >= 10] or grid_results
@@ -819,7 +855,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
         }
         return best, valid[:5]
 
-    best_bull, bull_top5 = eval_bull_grid(bull_events)
+    best_bull, bull_top5, bull_by_regime = eval_bull_grid(bull_events)
     best_bear, bear_top5 = eval_bear_grid(bear_events)
 
     # 負期望值自動保護盾 (Circuit Breaker) 與三大市場位階動態建議
@@ -846,10 +882,20 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
 
     return {
         "calibrated": True,
-        "version": "V21.7",
+        "version": "V21.7.1",
         "tradeDate": trade_dt,
-        "windowStart": start_dt_seen if start_dt_seen != "9999-99-99" else trade_dt,
-        "windowEnd": end_dt_seen if end_dt_seen != "0000-00-00" else trade_dt,
+        "windowStart": bear_start_seen if bear_start_seen != "9999-99-99" else trade_dt,
+        "windowEnd": bear_end_seen if bear_end_seen != "0000-00-00" else trade_dt,
+        "bullWindow": {
+            "start": bull_start_seen if bull_start_seen != "9999-99-99" else trade_dt,
+            "end": bull_end_seen if bull_end_seen != "0000-00-00" else trade_dt,
+            "holdDays": HOLD_BULL,
+        },
+        "bearWindow": {
+            "start": bear_start_seen if bear_start_seen != "9999-99-99" else trade_dt,
+            "end": bear_end_seen if bear_end_seen != "0000-00-00" else trade_dt,
+            "holdDays": HOLD_BEAR,
+        },
         "sampleSize": len(picked),
         "triggeredStocks": len(stock_candidates),
         "real60mCount": real_60m_used,
@@ -863,6 +909,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
         "bearTotalSignals": len(bear_events),
         "bullStatus": bull_status,
         "recommendedRegime": rec_regime,
+        "bullByMarketRegime": bull_by_regime,
         "regimePresets": regime_presets,
         "sampleCodesPreview": [f"{s['code']} {s['name']}" for s in picked[:50]],
         "bestBull": {
@@ -1280,7 +1327,7 @@ def main():
                 if res.get("bars"):
                     k60_cache_mem[s["code"]] = res["bars"]
 
-    log("🧪 執行 V21.7 實戰微調雙流共振全市場 2,000 檔近 3 個月回測（含 RS 強弱濾網＋反洗盤緩衝出場）...")
+    log("🧪 執行 V21.7.1 雙流共振全市場 2,000 檔多空獨立窗口回測（含大盤 20MA 順逆風對照組）...")
     dual_bt = run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_rw=tx_rw, mkt_tot=mkt_tot)
     _smap = {s["code"]: s for s in stocks}
     for code, res in k60_state_mem.items():
@@ -1393,7 +1440,7 @@ def main():
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
-        "version": "V21.7",
+        "version": "V21.7.1",
         "dualAlert": dual_bt,
         "date": trade_dt,
         "generatedAt": f"{ts_now} (GitHub自動同步)",
@@ -1440,7 +1487,7 @@ def main():
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.7 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.7.1 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
     with open(os.path.join(DATA_DIR, "dual_alert_backtest.json"), "w", encoding="utf-8") as f:
@@ -1524,6 +1571,8 @@ def main():
         f"- **🚀 看漲雙流共振最佳提醒數值**：乖離率 `0% ～ +{bb_b['biasMax']}%`、量比 `≥ {bb_b['vrMin']}x`、60分K 20MA 斜率 `≥ +{bb_b['slopeMin']}%`、停損 `{bb_b['slPct']}%`（近3月有效不重疊觸發 **`{bb_b['trades']}` 筆**｜勝率 **`{bb_b['winRate']}%`**｜單筆平均淨報酬 **`{bb_b['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_b['pf']}`**）。",
         f"- **🔻 看跌雙流共振最佳提醒數值**：負乖離 `{bb_s['biasMax']}% ～ 0%`、破線量比 `≥ {bb_s['vrMin']}x`、60分K 20MA 斜率 `≤ {bb_s['slopeMin']}%`、反彈解除線 `{bb_s['slPct']}%`（近3月有效不重疊觸發 **`{bb_s['trades']}` 筆**｜勝率 **`{bb_s['winRate']}%`**｜單筆平均淨報酬 **`{bb_s['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_s['pf']}`**）。",
         f"- **🛡️ 實戰位階自動判定**：目前大盤 V21 `{mkt_tot}` 分 → 建議啟用 **`{dual_bt['regimePresets'][dual_bt['recommendedRegime']]['name']}`**（多頭期望值檢核：`{dual_bt['bullStatus']}`；若處逆風自動套用 RS ≥ 85 ＋ 法人買超 ＋ 乖離 ≤ +4.5% 嚴選保護）。",
+        f"- **📐 多空獨立結算窗口**：多頭 10 日波段（`{dual_bt['bullWindow']['start']}` ～ `{dual_bt['bullWindow']['end']}`）｜空頭 5 日急跌（`{dual_bt['bearWindow']['start']}` ～ `{dual_bt['bearWindow']['end']}`）。",
+        f"- **🌤️ 大盤月線（20MA）順風 vs. 逆風看漲對照**：大盤站上 20MA 時做多 **`{dual_bt['bullByMarketRegime']['above20ma']['trades']}` 筆**（勝率 `{dual_bt['bullByMarketRegime']['above20ma']['winRate']}%`｜均報 `{dual_bt['bullByMarketRegime']['above20ma']['avgRet']:+.2f}%`｜PF **`{dual_bt['bullByMarketRegime']['above20ma']['pf']}`**） vs. 大盤跌破 20MA 時做多 **`{dual_bt['bullByMarketRegime']['below20ma']['trades']}` 筆**（勝率 `{dual_bt['bullByMarketRegime']['below20ma']['winRate']}%`｜均報 `{dual_bt['bullByMarketRegime']['below20ma']['avgRet']:+.2f}%`｜PF **`{dual_bt['bullByMarketRegime']['below20ma']['pf']}`**）。",
         "\n| 方向/排名 | 乖離門檻 | 量比門檻 | 20MA斜率 | 停損線 | 有效筆數 | 勝率 | 均淨報酬 | 獲利因子(PF) |",
         "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
     ]
