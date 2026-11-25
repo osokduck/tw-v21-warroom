@@ -1,4 +1,4 @@
-name: 台股 V21.2 每日盤後全自動更新
+name: 台股 V21.3 每日盤後全自動更新
 
 on:
   push:
@@ -14,16 +14,14 @@ permissions:
   contents: write
   pages: write
   id-token: write
+  actions: read
 
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  update-and-deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -31,7 +29,7 @@ jobs:
       - name: 1. 檢出儲存庫
         uses: actions/checkout@v4
 
-      - name: 2. 自動歸位資料夾結構（首次執行自動整理）
+      - name: 2. 自動歸位資料夾結構
         run: |
           mkdir -p scripts data
           if [ -f "v21_ci.py" ]; then mv -f "v21_ci.py" "scripts/v21_ci.py"; fi
@@ -44,7 +42,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 4. 執行 V21.2 零誤差全市場盤後分析
+      - name: 4. 執行 V21.3 零誤差全市場盤後分析
         run: python3 -B scripts/v21_ci.py
 
       - name: 5. 自動提交最新盤後資料
@@ -57,18 +55,37 @@ jobs:
             echo "今日資料無變動，略過提交。"
           else
             TW_DATE=$(TZ='Asia/Taipei' date '+%Y-%m-%d %H:%M')
-            git commit -m "📊 自動更新台股 V21.2 盤後戰情 (${TW_DATE} CST)"
+            git commit -m "📊 自動更新台股 V21.3 盤後戰情 (${TW_DATE} CST)"
             git push
           fi
 
-      - name: 6. 設定 GitHub Pages
+      - name: 6. 整理乾淨網站發布目錄
+        run: |
+          rm -rf _site
+          mkdir -p _site
+          cp -f index.html sw.js manifest.json apple-touch-icon.png icon-512.png _site/ 2>/dev/null || true
+          cp -r data _site/data
+          ls -lh _site _site/data
+
+      - name: 7. 設定 GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: 7. 打包網站與最新盤後資料
+      - name: 8. 上傳網站打包檔
         uses: actions/upload-pages-artifact@v3
         with:
-          path: '.'
+          path: '_site'
 
-      - name: 8. 發布至 GitHub Pages
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: 1. 等待打包檔同步就緒
+        run: sleep 5
+
+      - name: 2. 發布至 GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
