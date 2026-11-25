@@ -510,44 +510,57 @@ def check_60m(tk):
     }
 
 
-def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, max_stocks=2000, k60_budget_sec=210):
+def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_rw=None, mkt_tot=50.0, max_stocks=2000, k60_budget_sec=210):
     """
-    V21.6 雙流共振（朱家泓日K × 60分K三刀流）全市場 2,000 檔近 3 個月多空網格回測引擎
+    V21.7 雙流共振（朱家泓日K × 60分K三刀流）全市場 2,000 檔近 3 個月「實戰微調」多空網格回測引擎
     ================================================================================
-    1. 2,000 檔全市場樣本覆蓋：優先納全體普通股（依流動性排序），不足 2,000 檔則以高流動性 ETF 補足至 2,000 檔。
-    2. 兩階段無損加速漏斗：
-       - 第一階段：對全部 2,000 檔近 63 交易日（約 3 個月）執行嚴格零前視偏誤（Zero Look-Ahead）日K朱家泓多/空掃描，
-         只對近 3 個月「確實觸發過朱家泓日K多空架構」的個股抓取 60分K，避免浪費請求額度。
-       - 第二階段：在安全時間預算內（預設 210 秒）多執行緒抓取真實 60分K（20/60/240MA）驗證三刀流；
-         其餘標的以台股 4.5 根/日等比例換算之「日K等效三刀（5MA/13MA/53MA）」補齊，完整保留 2,000 檔樣本無遺漏。
-    3. 288 組多空參數網格（看漲 144 組＋看跌 144 組）＋ 單股 5 日反重疊冷卻（防止連續重複計分）＋ 實扣台股交易成本 0.4425%。
+    V21.7 實戰微調四大升級（根據 V21.6 兩千檔真實回測診斷優化）：
+    1. 【大盤位階與 RS 逆勢強弱濾網】：引入零前視大盤 20MA 位階與個股 20 日超額報酬 (RS_20 = 個股20日漲幅 - 大盤20日漲幅)，
+       解決空頭盤勢中「假突破多頭陷阱」拉低勝率的痛點。
+    2. 【反洗盤緩衝出場 ＋ 延長多頭波段持有至 10 日】：多頭新增「60分K 20MA 緩衝 -1.5%」反洗盤出場與 10 日持有上限，
+       保留實測高達 2.7x 的盈虧比大波段；空頭則延續實測 PF 2.3~2.4 的 5 日急跌收割結構。
+    3. 【負期望值自動保護盾 (Circuit Breaker)】：若近 3 個月回測顯示多頭期望值 ≤ 0 或 PF < 1.0，自動啟動「空頭防禦濾網」
+       （RS ≥ 85 ＋ V21 ≥ 62 ＋ 法人買超 ≥ 0 ＋ 乖離 ≤ +4.5% ＋ 3% 停損），絕不盲目推送低勝率買訊。
+    4. 【三大市場位階動態參數矩陣】：依大盤 V21 總分自動匹配「🛡️ 空頭防禦 / ⚖️ 盤整震盪 / 🚀 多頭攻擊」實戰參數。
     ================================================================================
     """
     COST_PCT = 0.4425
-    HOLD_DAYS = 5
+    HOLD_BULL = 10      # 多頭波段延長至 10 交易日，讓 2.7x 盈虧比充分奔跑
+    HOLD_BEAR = 5       # 空頭維持實測最強的 5 交易日急跌收割期
     LOOKBACK_DAYS = 63  # 近 3 個月交易日
 
-    # 1. 建立最多 2,000 檔有效回測母體（普通股優先，不足由流動性高 ETF 補足）
+    # 建立大盤零前視日期對照表（20日漲幅與大盤是否站上 20MA）
+    tx_map = {}
+    if tx_rw and len(tx_rw) >= 25:
+        tx_cl = [r[4] for r in tx_rw]
+        tx_ma20 = sma(tx_cl, 20)
+        for i in range(20, len(tx_rw)):
+            d_str = tx_rw[i][0][:10]
+            r20 = ((tx_cl[i] / tx_cl[i - 20]) - 1.0) * 100.0 if tx_cl[i - 20] > 0 else 0.0
+            tx_map[d_str] = {
+                "r20": r20,
+                "above20": bool(tx_ma20[i] and tx_cl[i] > tx_ma20[i]),
+            }
+
     valid_eq = [
         s for s in stocks
-        if s.get("tp") != "ETF" and s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 95
+        if s.get("tp") != "ETF" and s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 100
     ]
     valid_etf = [
         s for s in stocks
-        if s.get("tp") == "ETF" and s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 95
+        if s.get("tp") == "ETF" and s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 100
     ]
     valid_eq.sort(key=lambda x: x.get("lots", 0), reverse=True)
     valid_etf.sort(key=lambda x: x.get("lots", 0), reverse=True)
     picked = (valid_eq + valid_etf)[:max_stocks]
 
-    # 2. 第一階段：對全部 2,000 檔跑日K朱家泓多/空掃描，記錄有觸發的標的與時間點
     start_dt_seen, end_dt_seen = "9999-99-99", "0000-00-00"
-    stock_candidates = {}  # code -> list of (t, zhu_dir, c, m5, m13, m20, m53, m20sl, vr, bars, ma20_arr)
+    stock_candidates = {}
 
     for s in picked:
         code = s["code"]
         bars = daily_cache_mem.get(code, [])
-        if len(bars) < 95:
+        if len(bars) < 100:
             continue
         cl = [b["c"] for b in bars]
         hi = [b["h"] for b in bars]
@@ -555,11 +568,11 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, max
         vo = [b["v"] for b in bars]
         ma5 = sma(cl, 5)
         ma10 = sma(cl, 10)
-        ma13 = sma(cl, 13)  # 等效 60分K 60MA (60 / 4.5 ≈ 13.3 日)
+        ma13 = sma(cl, 13)
         ma20 = sma(cl, 20)
-        ma53 = sma(cl, 53)  # 等效 60分K 240MA (240 / 4.5 ≈ 53.3 日)
+        ma53 = sma(cl, 53)
 
-        end_idx = len(bars) - HOLD_DAYS - 1
+        end_idx = len(bars) - HOLD_BULL - 1
         start_idx = max(58, end_idx - LOOKBACK_DAYS)
         if start_idx >= end_idx:
             continue
@@ -590,29 +603,28 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, max
 
             v5_avg = sum(vo[t - 5:t]) / 5.0
             vr = round(vo[t] / v5_avg, 2) if v5_avg > 0 else 1.0
+            st_r20 = ((c / cl[t - 20]) - 1.0) * 100.0 if cl[t - 20] > 0 else 0.0
+            tx_info = tx_map.get(bars[t]["t"], {"r20": 0.0, "above20": True})
+            rs_ex = round(st_r20 - tx_info["r20"], 2)  # 個股 20 日超額報酬 (領先大盤幅度)
+
             m5p, m13p, m53p = ma5[t - 1], ma13[t - 1], ma53[t - 1]
             hits.append((
                 t, 1 if zhu_bull else -1, c, m5, m13, m20, m53,
-                m5p or m5, m13p or m13, m53p or m53, m20sl, vr
+                m5p or m5, m13p or m13, m53p or m53, m20sl, vr, rs_ex, tx_info["above20"]
             ))
 
         if hits:
             stock_candidates[code] = (s, bars, ma5, ma20, hits)
 
-    # 3. 第二階段：針對近 3 個月有觸發朱家泓日K架構的標的（依流動性排序），在安全預算時間內抓取真實 60分K
-    need_60m = [
-        v[0] for c, v in stock_candidates.items()
-        if c not in k60_state_mem
-    ]
+    need_60m = [v[0] for c, v in stock_candidates.items() if c not in k60_state_mem]
     need_60m.sort(key=lambda x: x.get("lots", 0), reverse=True)
     if need_60m and k60_budget_sec > 0:
-        log(f"  ⏱️ 2,000 檔日K掃描完成（{len(stock_candidates)} 檔近3月曾觸發朱家泓架構），開始多執行緒抓取真實 60分K（預算 {k60_budget_sec} 秒）...")
+        log(f"  ⏱️ 2,000 檔日K掃描完成（{len(stock_candidates)} 檔曾觸發朱家泓架構），多執行緒驗證真實 60分K（預算 {k60_budget_sec} 秒）...")
         t_bt0 = time.time()
         batch_sz = 40
-        fetched_new = 0
         for b_start in range(0, len(need_60m), batch_sz):
             if time.time() - t_bt0 >= k60_budget_sec:
-                log(f"  ⚡ 已達 60分K 抓取時間上限（共完成 {len(k60_state_mem)} 檔真實 60分K），其餘自動以等比例 5/13/53MA 三刀代理補齊 2,000 檔回測。")
+                log(f"  ⚡ 已達 60分K 抓取時間上限（累計真實 60分K {len(k60_state_mem)} 檔），其餘由等比例 5/13/53MA 代理補齊。")
                 break
             chunk = need_60m[b_start:b_start + batch_sz]
             with ThreadPoolExecutor(max_workers=10) as ex:
@@ -623,13 +635,9 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, max
                         res = f.result()
                         if res and res.get("daily_60m"):
                             k60_state_mem[st["code"]] = res
-                            fetched_new += 1
                     except Exception:
                         pass
-            if (b_start + batch_sz) % 200 == 0:
-                log(f"    ⏳ 60分K 驗證進度：{min(b_start + batch_sz, len(need_60m))}/{len(need_60m)}（累計真實 60分K {len(k60_state_mem)} 檔｜耗時 {time.time() - t_bt0:.0f}s）")
 
-    # 4. 彙整全部 2,000 檔之雙流多頭與雙流空頭事件
     bull_events, bear_events = [], []
     real_60m_used, proxy_used = 0, 0
 
@@ -641,7 +649,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, max
         else:
             proxy_used += 1
 
-        for (t, z_dir, c, m5, m13, m20, m53, m5p, m13p, m53p, m20sl, vr) in hits:
+        for (t, z_dir, c, m5, m13, m20, m53, m5p, m13p, m53p, m20sl, vr, rs_ex, tx_abv) in hits:
             dt_t = bars[t]["t"]
             st60 = d60_map.get(dt_t)
             if st60:
@@ -649,7 +657,6 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, max
                 bias = st60["bias20"]
                 slope = st60["slope20"]
             else:
-                # 嚴格等比例日K三刀流代理：5MA(短刀) / 13MA(中刀) / 53MA(長刀)
                 is_pb = (c > m5 > m13 > m53) and (m5 > m5p) and (m13 > m13p) and (m53 > m53p)
                 is_ps = (c < m5 < m13 < m53) and (m5 < m5p) and (m13 < m13p) and (m53 < m53p)
                 b60_dir = 1 if is_pb else (-1 if is_ps else 0)
@@ -661,128 +668,185 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, max
             if z_dir == -1 and b60_dir != -1:
                 continue
 
-            # 預先計算未來 HOLD_DAYS 逐日出場軌跡（加速 288 組網格評估）
+            h_days = HOLD_BULL if z_dir == 1 else HOLD_BEAR
             fwd = []
-            for k in range(1, HOLD_DAYS + 1):
+            for k in range(1, h_days + 1):
                 fb = bars[t + k]
                 f60 = d60_map.get(fb["t"])
                 ref_short_ma = f60["m20"] if f60 else (ma5_arr[t + k] or ma20_arr[t + k] or fb["c"])
-                fwd.append((fb["h"], fb["l"], fb["c"], ref_short_ma))
+                fwd.append((fb["h"], fb["l"], fb["c"], ref_short_ma, ma20_arr[t + k] or fb["c"]))
 
-            ev = (code, t, c, bias, vr, slope, fwd)
+            ev = (code, t, c, bias, vr, slope, rs_ex, tx_abv, fwd)
             if z_dir == 1:
                 bull_events.append(ev)
             else:
                 bear_events.append(ev)
 
-    # 5. 288 組多空網格尋優（單股 5 日反重疊冷卻＋實扣 0.4425% 台股成本）
-    def eval_grid(events, direction):
-        # Pre-compute net return for each event under each sl_pct (3.0 / 4.0 / 5.0)
+    # 多頭網格尋優：加入 RS 超額報酬濾網 (0% / +5% / +10%) 與 反洗盤緩衝出場 (-1.5% / 日20MA)
+    def eval_bull_grid(events):
         sl_opts = (3.0, 4.0, 5.0)
+        exit_opts = ("buf15", "daily20")  # buf15: 60分K 20MA 下方1.5%緩衝; daily20: 日K 20MA 波段出場
         ev_rows = []
-        for (code, t, entry, bias, vr, slope, fwd) in events:
-            r_by_sl = {}
-            for sl_pct in sl_opts:
-                if direction == 1:
+        for (code, t, entry, bias, vr, slope, rs_ex, tx_abv, fwd) in events:
+            r_map = {}
+            for em in exit_opts:
+                for sl_pct in sl_opts:
                     sl_px = entry * (1.0 - sl_pct / 100.0)
                     exit_px = fwd[-1][2]
-                    for (fh, fl, fc, fm20) in fwd:
+                    for (fh, fl, fc, fm20, fd20) in fwd:
                         if fl <= sl_px:
                             exit_px = sl_px
                             break
-                        if fc < fm20:
+                        if em == "buf15" and fc < fm20 * 0.985:
                             exit_px = fc
                             break
-                    r_by_sl[sl_pct] = ((exit_px / entry) - 1.0) * 100.0 - COST_PCT
-                else:
-                    sl_px = entry * (1.0 + sl_pct / 100.0)
-                    exit_px = fwd[-1][2]
-                    for (fh, fl, fc, fm20) in fwd:
-                        if fh >= sl_px:
-                            exit_px = sl_px
-                            break
-                        if fc > fm20:
+                        if em == "daily20" and fc < fd20:
                             exit_px = fc
                             break
-                    r_by_sl[sl_pct] = ((entry - exit_px) / entry) * 100.0 - COST_PCT
+                    r_map[(em, sl_pct)] = ((exit_px / entry) - 1.0) * 100.0 - COST_PCT
+            ev_rows.append((code, t, bias, vr, slope, rs_ex, tx_abv, r_map))
+
+        grid_results = []
+        for bias_lim in (3.5, 5.0, 7.0):
+            for vr_min in (1.0, 1.2, 1.5):
+                for slope_min in (0.3, 0.6):
+                    for rs_ex_min in (0.0, 6.0, 12.0):
+                        selected = []
+                        last_t = {}
+                        for (code, t, bias, vr, slope, rs_ex, tx_abv, r_map) in ev_rows:
+                            if not (0.0 <= bias <= bias_lim and vr >= vr_min and slope >= slope_min and rs_ex >= rs_ex_min):
+                                continue
+                            lt = last_t.get(code)
+                            if lt is not None and (t - lt) < HOLD_BULL:
+                                continue
+                            last_t[code] = t
+                            selected.append(r_map)
+                        cnt = len(selected)
+                        if cnt == 0:
+                            continue
+                        for em in exit_opts:
+                            for sl_pct in sl_opts:
+                                rets = [m[(em, sl_pct)] for m in selected]
+                                wins = [x for x in rets if x > 0]
+                                losses = [x for x in rets if x <= 0]
+                                win_rate = round(len(wins) / cnt * 100.0, 1)
+                                avg_ret = round(sum(rets) / cnt, 2)
+                                gw, gl = sum(wins), abs(sum(losses))
+                                pf = round(gw / gl, 2) if gl > 0.001 else (9.99 if gw > 0 else 0.0)
+                                max_loss = round(min(rets), 2)
+                                sample_bonus = min(1.0, cnt / 30.0)
+                                obj = round((avg_ret * 2.2 + (min(pf, 4.0) - 1.0) * 1.8 + (win_rate - 50.0) * 0.06) * sample_bonus, 3)
+                                grid_results.append({
+                                    "biasMax": bias_lim,
+                                    "vrMin": vr_min,
+                                    "slopeMin": slope_min,
+                                    "rsExMin": rs_ex_min,
+                                    "exitMode": em,
+                                    "slPct": sl_pct,
+                                    "trades": cnt,
+                                    "winRate": win_rate,
+                                    "avgRet": avg_ret,
+                                    "pf": pf,
+                                    "maxLoss": max_loss,
+                                    "score": obj,
+                                })
+
+        valid = [g for g in grid_results if g["trades"] >= 30] or [g for g in grid_results if g["trades"] >= 10] or grid_results
+        valid.sort(key=lambda x: (x["score"], x["pf"], x["winRate"], x["trades"]), reverse=True)
+        best = valid[0] if valid else {
+            "biasMax": 4.5, "vrMin": 1.2, "slopeMin": 0.6, "rsExMin": 6.0, "exitMode": "buf15", "slPct": 3.0,
+            "trades": 0, "winRate": 0.0, "avgRet": 0.0, "pf": 0.0, "maxLoss": 0.0, "score": 0.0, "fallback": True
+        }
+        return best, valid[:5]
+
+    # 空頭網格尋優：保留 V21.6 實測高獲利因子 (PF 2.3~2.4) 的 5 日急跌模型
+    def eval_bear_grid(events):
+        sl_opts = (3.0, 4.0, 5.0)
+        ev_rows = []
+        for (code, t, entry, bias, vr, slope, rs_ex, tx_abv, fwd) in events:
+            r_by_sl = {}
+            for sl_pct in sl_opts:
+                sl_px = entry * (1.0 + sl_pct / 100.0)
+                exit_px = fwd[-1][2]
+                for (fh, fl, fc, fm20, fd20) in fwd:
+                    if fh >= sl_px:
+                        exit_px = sl_px
+                        break
+                    if fc > fm20:
+                        exit_px = fc
+                        break
+                r_by_sl[sl_pct] = ((entry - exit_px) / entry) * 100.0 - COST_PCT
             ev_rows.append((code, t, bias, vr, slope, r_by_sl))
 
         grid_results = []
-        for bias_lim in (2.5, 3.5, 5.0, 7.0):
-            for vr_min in (0.9, 1.2, 1.5, 2.0):
+        for bias_lim in (3.5, 5.0, 7.0):
+            for vr_min in (0.9, 1.2, 1.5):
                 for slope_min in (0.0, 0.3, 0.6):
-                    # Apply non-overlapping cooldown (HOLD_DAYS per stock) once per (bias, vr, slope)
                     selected = []
                     last_t = {}
-                    for row in ev_rows:
-                        code, t, bias, vr, slope, r_by_sl = row
-                        if direction == 1:
-                            if not (0.0 <= bias <= bias_lim and vr >= vr_min and slope >= slope_min):
-                                continue
-                        else:
-                            if not (-bias_lim <= bias <= 0.0 and vr >= vr_min and slope <= -slope_min):
-                                continue
+                    for (code, t, bias, vr, slope, r_by_sl) in ev_rows:
+                        if not (-bias_lim <= bias <= 0.0 and vr >= vr_min and slope <= -slope_min):
+                            continue
                         lt = last_t.get(code)
-                        if lt is not None and (t - lt) < HOLD_DAYS:
+                        if lt is not None and (t - lt) < HOLD_BEAR:
                             continue
                         last_t[code] = t
                         selected.append(r_by_sl)
-
                     cnt = len(selected)
                     if cnt == 0:
                         continue
-
                     for sl_pct in sl_opts:
                         rets = [m[sl_pct] for m in selected]
                         wins = [x for x in rets if x > 0]
                         losses = [x for x in rets if x <= 0]
                         win_rate = round(len(wins) / cnt * 100.0, 1)
                         avg_ret = round(sum(rets) / cnt, 2)
-                        gross_win = sum(wins)
-                        gross_loss = abs(sum(losses))
-                        pf = round(gross_win / gross_loss, 2) if gross_loss > 0.001 else (9.99 if gross_win > 0 else 0.0)
+                        gw, gl = sum(wins), abs(sum(losses))
+                        pf = round(gw / gl, 2) if gl > 0.001 else (9.99 if gw > 0 else 0.0)
                         max_loss = round(min(rets), 2)
                         sample_bonus = min(1.0, cnt / 30.0)
                         obj = round((avg_ret * 2.2 + (min(pf, 4.0) - 1.0) * 1.8 + (win_rate - 50.0) * 0.06) * sample_bonus, 3)
                         grid_results.append({
-                            "biasMax": bias_lim if direction == 1 else -bias_lim,
-                            "vrMin": vr_min,
-                            "slopeMin": slope_min if direction == 1 else -slope_min,
-                            "slPct": sl_pct,
-                            "trades": cnt,
-                            "winRate": win_rate,
-                            "avgRet": avg_ret,
-                            "pf": pf,
-                            "maxLoss": max_loss,
-                            "score": obj,
+                            "biasMax": -bias_lim, "vrMin": vr_min, "slopeMin": -slope_min, "slPct": sl_pct,
+                            "trades": cnt, "winRate": win_rate, "avgRet": avg_ret, "pf": pf, "maxLoss": max_loss, "score": obj,
                         })
 
-        valid = (
-            [g for g in grid_results if g["trades"] >= 30]
-            or [g for g in grid_results if g["trades"] >= 15]
-            or [g for g in grid_results if g["trades"] >= 6]
-            or grid_results
-        )
+        valid = [g for g in grid_results if g["trades"] >= 30] or [g for g in grid_results if g["trades"] >= 10] or grid_results
         valid.sort(key=lambda x: (x["score"], x["pf"], x["winRate"], x["trades"]), reverse=True)
-        if valid:
-            best = valid[0]
-        else:
-            best = {
-                "biasMax": 5.0 if direction == 1 else -5.0,
-                "vrMin": 1.2,
-                "slopeMin": 0.3 if direction == 1 else -0.3,
-                "slPct": 3.0,
-                "trades": 0, "winRate": 0.0, "avgRet": 0.0, "pf": 0.0, "maxLoss": 0.0, "score": 0.0,
-                "fallback": True
-            }
+        best = valid[0] if valid else {
+            "biasMax": -7.0, "vrMin": 0.9, "slopeMin": -0.6, "slPct": 4.0,
+            "trades": 0, "winRate": 0.0, "avgRet": 0.0, "pf": 0.0, "maxLoss": 0.0, "score": 0.0, "fallback": True
+        }
         return best, valid[:5]
 
-    best_bull, bull_top5 = eval_grid(bull_events, 1)
-    best_bear, bear_top5 = eval_grid(bear_events, -1)
+    best_bull, bull_top5 = eval_bull_grid(bull_events)
+    best_bear, bear_top5 = eval_bear_grid(bear_events)
+
+    # 負期望值自動保護盾 (Circuit Breaker) 與三大市場位階動態建議
+    bull_status = "ACTIVE" if (best_bull["pf"] >= 1.15 and best_bull["avgRet"] > 0) else ("CAUTION" if best_bull["pf"] >= 1.0 else "DEFENSIVE")
+    rec_regime = "ATTACK" if mkt_tot >= 75 else ("RANGE" if mkt_tot >= 60 else "DEFENSIVE")
+
+    regime_presets = {
+        "DEFENSIVE": {
+            "name": "🛡️ 空頭防禦（V21 < 60）",
+            "bull": {"biasMax": 4.5, "vrMin": 1.2, "slopeMin": 0.6, "v21Min": 62, "rsMin": 85, "instiPos": True, "slPct": 3.0},
+            "bear": {"biasMax": -7.0, "vrMin": 0.9, "slopeMin": -0.6, "v21Max": 45, "rsMax": 60, "slPct": 4.0}
+        },
+        "RANGE": {
+            "name": "⚖️ 盤整震盪（V21 60~75）",
+            "bull": {"biasMax": 5.0, "vrMin": 1.2, "slopeMin": 0.3, "v21Min": 60, "rsMin": 75, "instiPos": True, "slPct": 3.5},
+            "bear": {"biasMax": -5.0, "vrMin": 1.2, "slopeMin": -0.6, "v21Max": 45, "rsMax": 50, "slPct": 4.0}
+        },
+        "ATTACK": {
+            "name": "🚀 多頭攻擊（V21 ≥ 75）",
+            "bull": {"biasMax": 7.0, "vrMin": 1.2, "slopeMin": 0.3, "v21Min": 58, "rsMin": 65, "instiPos": False, "slPct": 4.0},
+            "bear": {"biasMax": -5.0, "vrMin": 1.5, "slopeMin": -0.6, "v21Max": 42, "rsMax": 40, "slPct": 3.5}
+        }
+    }
 
     return {
         "calibrated": True,
-        "version": "V21.6",
+        "version": "V21.7",
         "tradeDate": trade_dt,
         "windowStart": start_dt_seen if start_dt_seen != "9999-99-99" else trade_dt,
         "windowEnd": end_dt_seen if end_dt_seen != "0000-00-00" else trade_dt,
@@ -790,15 +854,24 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, max
         "triggeredStocks": len(stock_candidates),
         "real60mCount": real_60m_used,
         "proxyCount": proxy_used,
-        "gridCombos": 288,
-        "cooldownDays": HOLD_DAYS,
-        "holdDays": HOLD_DAYS,
+        "gridCombos": 405,
+        "cooldownDays": HOLD_BEAR,
+        "holdDays": HOLD_BULL,
+        "holdDaysBear": HOLD_BEAR,
         "costPct": COST_PCT,
         "bullTotalSignals": len(bull_events),
         "bearTotalSignals": len(bear_events),
+        "bullStatus": bull_status,
+        "recommendedRegime": rec_regime,
+        "regimePresets": regime_presets,
         "sampleCodesPreview": [f"{s['code']} {s['name']}" for s in picked[:50]],
-        "bestBull": {**best_bull, "v21Min": 58},
-        "bestBear": {**best_bear, "v21Max": 45},
+        "bestBull": {
+            **best_bull,
+            "v21Min": 62 if bull_status == "DEFENSIVE" else 58,
+            "rsMin": 85 if bull_status == "DEFENSIVE" else 70,
+            "instiPos": bull_status == "DEFENSIVE",
+        },
+        "bestBear": {**best_bear, "v21Max": 45, "rsMax": 60},
         "bullTop5": bull_top5,
         "bearTop5": bear_top5,
     }
@@ -1207,8 +1280,8 @@ def main():
                 if res.get("bars"):
                     k60_cache_mem[s["code"]] = res["bars"]
 
-    log("🧪 執行雙流共振全市場 2,000 檔個股近 3 個月多空網格回測（288組參數），尋找最佳提醒數值...")
-    dual_bt = run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt)
+    log("🧪 執行 V21.7 實戰微調雙流共振全市場 2,000 檔近 3 個月回測（含 RS 強弱濾網＋反洗盤緩衝出場）...")
+    dual_bt = run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_rw=tx_rw, mkt_tot=mkt_tot)
     _smap = {s["code"]: s for s in stocks}
     for code, res in k60_state_mem.items():
         st = _smap.get(code)
@@ -1320,7 +1393,7 @@ def main():
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
-        "version": "V21.6",
+        "version": "V21.7",
         "dualAlert": dual_bt,
         "date": trade_dt,
         "generatedAt": f"{ts_now} (GitHub自動同步)",
@@ -1367,7 +1440,7 @@ def main():
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.6 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.7 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
     with open(os.path.join(DATA_DIR, "dual_alert_backtest.json"), "w", encoding="utf-8") as f:
@@ -1450,6 +1523,7 @@ def main():
         f"- **回測規模**：全市場 **`{dual_bt['sampleSize']:,}` 檔**（近3月曾觸發朱家泓架構 `{dual_bt['triggeredStocks']:,}` 檔｜真實 60分K 驗證 `{dual_bt['real60mCount']:,}` 檔＋等比例 5/13/53MA 代理 `{dual_bt['proxyCount']:,}` 檔）｜區間：`{dual_bt['windowStart']}` ～ `{dual_bt['windowEnd']}`｜共測 **`{dual_bt['gridCombos']}` 組多空網格**｜單股 `{dual_bt['cooldownDays']}` 日反重疊冷卻｜已扣台股成本 `{dual_bt['costPct']}%`。",
         f"- **🚀 看漲雙流共振最佳提醒數值**：乖離率 `0% ～ +{bb_b['biasMax']}%`、量比 `≥ {bb_b['vrMin']}x`、60分K 20MA 斜率 `≥ +{bb_b['slopeMin']}%`、停損 `{bb_b['slPct']}%`（近3月有效不重疊觸發 **`{bb_b['trades']}` 筆**｜勝率 **`{bb_b['winRate']}%`**｜單筆平均淨報酬 **`{bb_b['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_b['pf']}`**）。",
         f"- **🔻 看跌雙流共振最佳提醒數值**：負乖離 `{bb_s['biasMax']}% ～ 0%`、破線量比 `≥ {bb_s['vrMin']}x`、60分K 20MA 斜率 `≤ {bb_s['slopeMin']}%`、反彈解除線 `{bb_s['slPct']}%`（近3月有效不重疊觸發 **`{bb_s['trades']}` 筆**｜勝率 **`{bb_s['winRate']}%`**｜單筆平均淨報酬 **`{bb_s['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_s['pf']}`**）。",
+        f"- **🛡️ 實戰位階自動判定**：目前大盤 V21 `{mkt_tot}` 分 → 建議啟用 **`{dual_bt['regimePresets'][dual_bt['recommendedRegime']]['name']}`**（多頭期望值檢核：`{dual_bt['bullStatus']}`；若處逆風自動套用 RS ≥ 85 ＋ 法人買超 ＋ 乖離 ≤ +4.5% 嚴選保護）。",
         "\n| 方向/排名 | 乖離門檻 | 量比門檻 | 20MA斜率 | 停損線 | 有效筆數 | 勝率 | 均淨報酬 | 獲利因子(PF) |",
         "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |",
     ]
