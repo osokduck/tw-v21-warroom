@@ -882,7 +882,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
 
     return {
         "calibrated": True,
-        "version": "V21.8",
+        "version": "V21.8.1",
         "tradeDate": trade_dt,
         "windowStart": bear_start_seen if bear_start_seen != "9999-99-99" else trade_dt,
         "windowEnd": bear_end_seen if bear_end_seen != "0000-00-00" else trade_dt,
@@ -924,30 +924,33 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
     }
 def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, trade_dt):
     """
-    V21.8 大盤 2 年位階回測 × 2,000 檔市場廣度與雙流共振風險警示引擎
+    V21.8.1 大盤 2 年位階回測 × 2,000 檔市場廣度與雙流共振風險警示引擎（實測微調版）
     ================================================================================
-    1. 以近 3 年大盤日K暖機 240MA，完整回測近 2 年（最多 500 交易日）大盤五大位階表現。
-    2. 逐日結合全市場 2,000 檔真實廣度（站上20MA/60MA比例、朱家泓多空家數比）交叉判定：
-       - CRASH_ALERT   (🚨 系統性破年線危機)
-       - BEAR_DEFENSE  (🛡️ 空頭防禦修正)
-       - CONSOLIDATION (⚖️ 震盪整理換手)
-       - BULL_ATTACK   (🚀 多頭攻擊主升)
-       - OVERHEAT      (🔥 高檔過熱警戒 / 拉積盤背離)
-    3. 零前視回測「V21.8 位階動態控倉策略」vs.「100% 滿倉死抱大盤 (Buy & Hold)」2年績效與 MDD，
-       並產出當日最新位階判斷警示、關鍵防守價位與結構化風險提醒。
+    V21.8.1 依據近 2 年 486 交易日實測數據完成三大精準微調：
+    1. 【拆解高檔過熱（六階控倉模型）】：
+       - 原 OVERHEAT 占比達 31.5% 且 20日勝率 71.9%，一刀切降倉至 50% 過於保守。
+       - 細分為「⚡ 強勢軋空高檔 (STRONG_SURGE, 權重 70%，廣度健康 ≥38% 且非極端噴出)」與
+         「🔥 極端過熱／拉積背離 (OVERHEAT, 權重 45%，拉積盤廣度 <38% 或月/季/年線乖離極端噴出)」。
+    2. 【收緊最毒主跌段權重】：
+       - 實測顯示 BEAR_DEFENSE 未來 5/10 日均為負報酬且 20日平均回撤 -7.36%，將防禦權重由 25% 收緊至 20%（建議倉位 20%～35%），
+         同時將 BULL_ATTACK 提至 90%、CONSOLIDATION 提至 60%，顯著拉高多頭參與率並守穩 MDD。
+    3. 【新增「右側轉折抄底觀察指標 (reboundWatch)」】：
+       - 實測 CRASH_ALERT 危機區 20日反彈勝率高達 90.2%，於空頭／危機期間自動追蹤三大右側確認條件
+         （①重站回 240MA 年線、②2,000 檔站月線脫離冰點突破 15%、③站上 5MA 且 5MA 翻揚），直接顯示於首頁警示卡。
     ================================================================================
     """
     REGIME_META = {
-        "BULL_ATTACK":   {"name": "🚀 多頭攻擊主升", "riskLevel": 1, "riskLabel": "低風險・順勢進攻", "posCap": "70%～85%", "weight": 0.85, "cls": "b-up"},
-        "CONSOLIDATION": {"name": "⚖️ 震盪整理換手", "riskLevel": 2, "riskLabel": "中低風險・區間操作", "posCap": "45%～60%", "weight": 0.55, "cls": "b-cyan"},
-        "OVERHEAT":      {"name": "🔥 高檔過熱警戒", "riskLevel": 3, "riskLabel": "中度警戒・防乖離拉回", "posCap": "45%～55%", "weight": 0.50, "cls": "b-amber"},
-        "BEAR_DEFENSE":  {"name": "🛡️ 空頭防禦修正", "riskLevel": 4, "riskLabel": "高風險・嚴控水位", "posCap": "25%～40%", "weight": 0.25, "cls": "b-amber"},
-        "CRASH_ALERT":   {"name": "🚨 系統性破線危機", "riskLevel": 5, "riskLabel": "極高風險・現金為王", "posCap": "0%～15%",  "weight": 0.10, "cls": "b-down"},
+        "BULL_ATTACK":   {"name": "🚀 多頭攻擊主升",     "riskLevel": 1, "riskLabel": "低風險・順勢進攻",     "posCap": "75%～90%", "weight": 0.90, "cls": "b-up"},
+        "STRONG_SURGE":  {"name": "⚡ 強勢軋空高檔",     "riskLevel": 2, "riskLabel": "中低風險・廣度健康續抱", "posCap": "60%～75%", "weight": 0.70, "cls": "b-up"},
+        "CONSOLIDATION": {"name": "⚖️ 震盪整理換手",     "riskLevel": 2, "riskLabel": "中低風險・區間操作",   "posCap": "45%～60%", "weight": 0.60, "cls": "b-cyan"},
+        "OVERHEAT":      {"name": "🔥 極端過熱／拉積背離", "riskLevel": 3, "riskLabel": "中度警戒・防背離急殺", "posCap": "35%～50%", "weight": 0.45, "cls": "b-amber"},
+        "BEAR_DEFENSE":  {"name": "🛡️ 空頭防禦修正",     "riskLevel": 4, "riskLabel": "高風險・嚴控水位",     "posCap": "20%～35%", "weight": 0.20, "cls": "b-amber"},
+        "CRASH_ALERT":   {"name": "🚨 系統性破線危機",   "riskLevel": 5, "riskLabel": "極高風險・現金為王",   "posCap": "0%～15%",  "weight": 0.10, "cls": "b-down"},
     }
-    ORDER = ("BULL_ATTACK", "OVERHEAT", "CONSOLIDATION", "BEAR_DEFENSE", "CRASH_ALERT")
+    ORDER = ("BULL_ATTACK", "STRONG_SURGE", "OVERHEAT", "CONSOLIDATION", "BEAR_DEFENSE", "CRASH_ALERT")
 
     if not tx_rw or len(tx_rw) < 120:
-        return {"calibrated": False, "version": "V21.8", "note": "大盤歷史資料不足 120 日"}
+        return {"calibrated": False, "version": "V21.8.1", "note": "大盤歷史資料不足 120 日"}
 
     dts = [r[0][:10] for r in tx_rw]
     cl = [float(r[4]) for r in tx_rw]
@@ -975,6 +978,8 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
 
     def classify_day(t):
         c = cl[t]
+        m5 = ma5[t] or c
+        m5p = ma5[t - 1] if (t >= 1 and ma5[t - 1]) else m5
         m20 = ma20[t] or c
         m60 = ma60[t] or m20
         m120 = ma120[t] or m60
@@ -982,6 +987,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
         m20p = ma20[t - 4] if (t >= 4 and ma20[t - 4]) else m20
         m60p = ma60[t - 4] if (t >= 4 and ma60[t - 4]) else m60
 
+        m5sl = ((m5 / m5p) - 1.0) * 100.0 if m5p > 0 else 0.0
         m20sl = ((m20 / m20p) - 1.0) * 100.0 if m20p > 0 else 0.0
         m60sl = ((m60 / m60p) - 1.0) * 100.0 if m60p > 0 else 0.0
         b20 = ((c / m20) - 1.0) * 100.0 if m20 > 0 else 0.0
@@ -1010,16 +1016,19 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
         o_r20 = otc_r20.get(dts[t])
         otc_rel = round(o_r20 - tx_r20, 2) if o_r20 is not None else 0.0
 
-        # 五大位階判定規則（整合大盤均線架構 ＋ 2,000 檔市場廣度）
+        # 六大位階判定規則（整合大盤均線架構 ＋ 2,000 檔市場廣度）
+        is_extreme_blowoff = (b20 >= 8.0 or b60 >= 18.0 or b240 >= 32.0)
+        is_breadth_div = (abv20_p is not None and abv20_p < 38.0 and b20 >= 1.5)
+        is_mod_extended = (b20 >= 5.0 or b60 >= 11.0 or b240 >= 22.0)
+
         if (c < m240 * 0.97) or (dd250 <= -15.0 and ((abv20_p is not None and abv20_p < 15.0) or c < m240)):
             rg = "CRASH_ALERT"
         elif (c < m20 and (c < m60 or (abv20_p is not None and abv20_p < 25.0) or (has_br and bbr >= 2.2))) or (c < m240):
             rg = "BEAR_DEFENSE"
-        elif (c > m20 and c > m60) and (
-            b20 >= 5.0 or b60 >= 11.0 or b240 >= 22.0
-            or (abv20_p is not None and abv20_p < 35.0 and b20 >= 2.0)
-        ):
+        elif (c > m20 and c > m60) and (is_extreme_blowoff or is_breadth_div):
             rg = "OVERHEAT"
+        elif (c > m20 and c > m60) and is_mod_extended and (abv20_p is None or abv20_p >= 38.0):
+            rg = "STRONG_SURGE"
         elif (c > m20 > m60) and (m20sl > 0) and (abv20_p is None or abv20_p >= 42.0):
             rg = "BULL_ATTACK"
         else:
@@ -1027,6 +1036,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
 
         return {
             "dt": dts[t], "rg": rg, "c": round(c, 2),
+            "m5": round(m5, 2), "m5sl": round(m5sl, 2),
             "m20": round(m20, 2), "m60": round(m60, 2), "m120": round(m120, 2), "m240": round(m240, 2),
             "high250": round(win_h, 2), "dd250": round(dd250, 2),
             "m20sl": round(m20sl, 2), "m60sl": round(m60sl, 2),
@@ -1039,7 +1049,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
     daily_states = [classify_day(t) for t in range(start_idx, n)]
     total_days = len(daily_states)
 
-    # 統計五大位階的未來 5/10/20 日大盤勝率、均報酬與 20 日回撤風險
+    # 統計六大位階的未來 5/10/20 日大盤勝率、均報酬與 20 日回撤風險
     buckets = {k: {"f5": [], "f10": [], "f20": [], "dd20": [], "days": 0} for k in ORDER}
     for idx_rel, st in enumerate(daily_states):
         t = start_idx + idx_rel
@@ -1134,6 +1144,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
     bh_perf = perf_metrics(eq_bh, ret_bh)
     st_perf = perf_metrics(eq_st, ret_st)
     dd_saved = round(abs(bh_perf["mdd"]) - abs(st_perf["mdd"]), 2)
+    avg_w = round(sum(REGIME_META[s["rg"]]["weight"] for s in daily_states) / max(total_days, 1) * 100.0, 1)
 
     # 抽樣約 70 點曲線供前端 Canvas 繪圖
     step = max(1, len(eq_dates) // 70)
@@ -1144,17 +1155,19 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
     if curve_pts[-1]["dt"] != eq_dates[-1]:
         curve_pts.append({"dt": eq_dates[-1], "bh": round(eq_bh[-1], 2), "st": round(eq_st[-1], 2), "rg": daily_states[-1]["rg"]})
 
-    # === 產出「當日最新位階判斷警示」與「2,000 檔交叉風險提醒」 ===
+    # === 產出「當日最新位階判斷警示」、「右側轉折抄底觀察」與「2,000 檔交叉風險提醒」 ===
     cur = daily_states[-1]
     cur_meta = REGIME_META[cur["rg"]]
     risk_alerts = []
 
     # 1. 大盤均線位階防線警示
     if cur["c"] < cur["m240"]:
+        gap_240 = round(cur["m240"] - cur["c"], 1)
+        gap_240_pct = round(((cur["m240"] / cur["c"]) - 1.0) * 100.0, 2) if cur["c"] > 0 else 0.0
         risk_alerts.append({
             "level": "danger", "tag": "破年線警報",
-            "title": f"加權指數跌破 240MA 年線（{cur['m240']:,.0f} 點）",
-            "detail": f"目前收盤 {cur['c']:,.1f} 點（年線乖離 {cur['b240']:+.2f}%），屬於中長期空頭警戒區，建議倉位壓低至 {cur_meta['posCap']}。"
+            "title": f"加權指數跌破 240MA 年線（{cur['m240']:,.0f} 點，需反彈 +{gap_240:,.0f} 點收復）",
+            "detail": f"目前收盤 {cur['c']:,.1f} 點（年線乖離 {cur['b240']:+.2f}%、距收復 +{gap_240_pct:.2f}%），屬於中長期空頭警戒區，建議倉位壓低至 {cur_meta['posCap']}。"
         })
     elif cur["b240"] <= 3.0:
         risk_alerts.append({
@@ -1178,11 +1191,11 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
     # 2. 2,000 檔市場廣度背離警示
     abv20 = cur["abv20Pct"]
     if abv20 is not None:
-        if cur["c"] > cur["m20"] and abv20 < 35.0:
+        if cur["c"] > cur["m20"] and abv20 < 38.0:
             risk_alerts.append({
                 "level": "danger", "tag": "拉積盤背離",
                 "title": f"指數創高／站月線，但 2,000 檔站上月線僅 {abv20}%",
-                "detail": "呈現權值撐盤、多數中小型股走弱的嚴重結構背離，追高個股極易中陷阱，務必嚴控個股 3% 停損。"
+                "detail": "呈現權值撐盤、超過六成個股走弱的嚴重結構背離，已將位階壓回「🔥 極端過熱／拉積背離」（倉位上限 35%～50%），務必嚴控個股 3% 停損。"
             })
         elif abv20 < 15.0:
             risk_alerts.append({
@@ -1190,7 +1203,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
                 "title": f"2,000 檔僅 {abv20}% 站上月線（多空家數比 1 : {cur['bearBullRatio']}）",
                 "detail": f"全市場朱家泓多頭僅 {cur['zbCnt']} 檔、空頭高達 {cur['zsCnt']} 檔，屬極度弱勢盤，切忌搶短攤平，僅能輕倉佈局極少數逆勢抗跌股。"
             })
-        elif abv20 < 35.0:
+        elif abv20 < 38.0:
             risk_alerts.append({
                 "level": "warn", "tag": "廣度偏弱",
                 "title": f"2,000 檔站上月線比例偏低（{abv20}%）",
@@ -1200,7 +1213,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
             risk_alerts.append({
                 "level": "ok", "tag": "廣度健康",
                 "title": f"2,000 檔站上月線比例達 {abv20}%（站季線 {cur['abv60Pct']}%）",
-                "detail": f"全市場多頭排列 {cur['zbCnt']} 檔，結構支撐良好，可順勢操作低乖離雙流共振股。"
+                "detail": f"全市場多頭排列 {cur['zbCnt']} 檔，結構支撐良好，高檔強勢盤可維持 60%～90% 水位順勢抱牢。"
             })
 
     # 3. 2,000 檔雙流回測交叉驗證警示
@@ -1224,11 +1237,11 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
             })
 
     # 4. 乖離過熱 / 空頭急彈與波動率風險提醒
-    if cur["c"] >= cur["m240"] and (cur["b20"] >= 5.0 or cur["b240"] >= 22.0):
+    if cur["c"] >= cur["m240"] and (cur["b20"] >= 8.0 or cur["b60"] >= 18.0 or cur["b240"] >= 32.0):
         risk_alerts.append({
-            "level": "warn", "tag": "高檔乖離過熱",
-            "title": f"大盤高檔正乖離擴大（月線 {cur['b20']:+.2f}% / 年線 {cur['b240']:+.2f}%）",
-            "detail": "歷史 2 年回測顯示高乖離階段容易出現急跌洗盤，嚴禁開盤追高，建議分批獲利了結並把倉位壓在 55% 以內。"
+            "level": "warn", "tag": "極端噴出過熱",
+            "title": f"大盤正乖離達極端過熱區（月線 {cur['b20']:+.2f}% / 季線 {cur['b60']:+.2f}% / 年線 {cur['b240']:+.2f}%）",
+            "detail": "歷史 2 年回測顯示極端正乖離易出現急跌洗盤，嚴禁開盤追高，建議分批獲利了結並把倉位壓在 50% 以內。"
         })
     elif cur["c"] < cur["m240"] and cur["b20"] >= 4.0:
         risk_alerts.append({
@@ -1243,8 +1256,33 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
             "detail": "盤中上下劇烈洗盤風險高，新進部位請縮減單筆部位至原本一半，絕不使用融資擴張槓桿。"
         })
 
+    # 5. 右側轉折確認監控（於空頭 / 破線危機期間自動啟動，避免左側亂接刀，同時不錯過高勝率反轉）
+    c_ma240_ok = cur["c"] >= cur["m240"]
+    c_br15_ok = (abv20 is not None and abv20 >= 15.0)
+    c_ma5_ok = (cur["c"] >= cur["m5"] and cur["m5sl"] > 0)
+    rebound_score = int(c_ma240_ok) + int(c_br15_ok) + int(c_ma5_ok)
+    rebound_watch = {
+        "active": cur["rg"] in ("CRASH_ALERT", "BEAR_DEFENSE"),
+        "passedCount": rebound_score,
+        "totalChecks": 3,
+        "checks": [
+            {"label": f"重站回 240MA 年線（{cur['m240']:,.0f} 點）", "ok": c_ma240_ok, "now": f"{cur['c']:,.1f}（{cur['b240']:+.2f}%）"},
+            {"label": "2,000 檔站月線脫離冰點（≥ 15%）", "ok": c_br15_ok, "now": f"{abv20}%" if abv20 is not None else "N/A"},
+            {"label": f"短線站上 5MA（{cur['m5']:,.0f}）且 5MA 翻揚", "ok": c_ma5_ok, "now": f"5MA斜率 {cur['m5sl']:+.2f}%"},
+        ],
+    }
+    if rebound_watch["active"]:
+        cur_stat_tmp = next((x for x in regime_stats if x["key"] == cur["rg"]), regime_stats[0])
+        chk_txt = "｜".join(f"{'✅' if ck['ok'] else '⬜'} {ck['label']}" for ck in rebound_watch["checks"])
+        risk_alerts.append({
+            "level": "ok" if rebound_score >= 2 else "warn",
+            "tag": f"右側轉折監控 {rebound_score}/3",
+            "title": f"達標 {rebound_score}/3 項右側翻多訊號（本位階歷史 20 日反彈勝率 {cur_stat_tmp['win20']}%）",
+            "detail": f"目前先嚴守低水位現金、絕不左側接刀；待以下條件至少亮 2 顆 ✅ 再分批加碼：{chk_txt}。"
+        })
+
     # 綜合 V21 大盤分數做最終倉位保守取交集
-    if mkt_tot < 55 and cur["rg"] in ("BULL_ATTACK", "CONSOLIDATION"):
+    if mkt_tot < 55 and cur["rg"] in ("BULL_ATTACK", "STRONG_SURGE", "CONSOLIDATION"):
         risk_alerts.append({
             "level": "warn", "tag": "V21 總分防禦覆核",
             "title": f"大盤 V21 綜合得分僅 {mkt_tot} 分（偏弱），強制下修倉位上限",
@@ -1259,7 +1297,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
 
     return {
         "calibrated": True,
-        "version": "V21.8",
+        "version": "V21.8.1",
         "tradeDate": trade_dt,
         "windowStart": daily_states[0]["dt"],
         "windowEnd": daily_states[-1]["dt"],
@@ -1278,18 +1316,19 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
             "histRet20": cur_stat["ret20"],
             "histAvgDd20": cur_stat["avgDd20"],
         },
+        "reboundWatch": rebound_watch,
         "riskAlerts": risk_alerts,
         "regimeStats": regime_stats,
         "strategyVsBuyHold": {
             "buyHold": bh_perf,
             "v21Regime": st_perf,
+            "avgWeightPct": avg_w,
             "drawdownSavedPct": dd_saved,
             "volReducedPct": round(bh_perf["annVol"] - st_perf["annVol"], 1),
         },
         "equityCurve": curve_pts,
         "recent20": recent_20,
     }
-
 def lbl(sc):
     if sc >= 90: return ("極強勢", "優先觀察突破")
     if sc >= 85: return ("強勢", "主升段候選")
@@ -1848,7 +1887,7 @@ def main():
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
-        "version": "V21.8",
+        "version": "V21.8.1",
         "dualAlert": dual_bt,
         "marketRegime": taiex_bt,
         "date": trade_dt,
@@ -1896,7 +1935,7 @@ def main():
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.8 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.8.1 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
     with open(os.path.join(DATA_DIR, "dual_alert_backtest.json"), "w", encoding="utf-8") as f:
@@ -1998,8 +2037,8 @@ def main():
             f"\n## 17｜大盤 2 年位階回測 × 2,000 檔共振風險警示（{taiex_bt['windowStart']} ～ {taiex_bt['windowEnd']}）",
             f"- **目前大盤位階判定**：**`{_cur['regimeName']}`**（風險等級 **`{_cur['riskLevel']}/5` — {_cur['riskLabel']}**｜建議總倉位上限 **`{_cur['posCap']}`**）。",
             f"- **關鍵均線與 2,000 檔廣度**：收盤 `{_cur['c']:,.1f}`｜20MA `{_cur['m20']:,.0f}`（`{_cur['b20']:+.2f}%`）｜60MA `{_cur['m60']:,.0f}`（`{_cur['b60']:+.2f}%`）｜240MA 年線 `{_cur['m240']:,.0f}`（`{_cur['b240']:+.2f}%`）｜2,000 檔站上月線 **`{_cur['abv20Pct']}%`**。",
-            f"- **2 年動態控倉回測驗證（{taiex_bt['tradingDays']} 交易日）**：V21.8 位階控倉總報酬 **`{_sv['v21Regime']['totalRet']:+.2f}%`** / 最大回撤 MDD **`{_sv['v21Regime']['mdd']}%`** / Calmar **`{_sv['v21Regime']['calmar']}`** vs. 大盤滿倉死抱總報酬 `{_sv['buyHold']['totalRet']:+.2f}%` / MDD `{_sv['buyHold']['mdd']}%`（少扛 **`{_sv['drawdownSavedPct']}%`** 跌幅，年化波動降低 **`{_sv['volReducedPct']}%`**）。",
-            "\n### 2 年五大位階歷史統計（未來 5日 / 10日 / 20日大盤實測）\n",
+            f"- **2 年動態控倉回測驗證（{taiex_bt['tradingDays']} 交易日）**：V21.8.1 六階控倉總報酬 **`{_sv['v21Regime']['totalRet']:+.2f}%`** / 最大回撤 MDD **`{_sv['v21Regime']['mdd']}%`** / Calmar **`{_sv['v21Regime']['calmar']}`** vs. 大盤滿倉死抱總報酬 `{_sv['buyHold']['totalRet']:+.2f}%` / MDD `{_sv['buyHold']['mdd']}%`（少扛 **`{_sv['drawdownSavedPct']}%`** 跌幅，年化波動降低 **`{_sv['volReducedPct']}%`**）。",
+            "\n### 2 年六大位階歷史統計（未來 5日 / 10日 / 20日大盤實測）\n",
             "| 位階燈號 | 建議倉位 | 出現天數(占比) | 未來5日勝率/均報 | 未來10日勝率/均報 | 未來20日勝率/均報 | 20日均回撤/最壞 |",
             "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
         ]
