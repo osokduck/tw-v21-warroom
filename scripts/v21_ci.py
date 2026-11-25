@@ -430,7 +430,12 @@ def calc_tech(rows, tx_ret):
 
     hh = max(hi[-10:]) > max(hi[-25:-10])
     hl = min(lo[-10:]) > min(lo[-25:-10])
+    lh = max(hi[-10:]) < max(hi[-25:-10])
+    ll = min(lo[-10:]) < min(lo[-25:-10])
     zhu = bool((c > m5 > m10 > m20) and (m20sl > 0) and hh and hl)
+    zhu_bear = bool((c < m5 < m10 < m20) and (m20sl < 0) and lh and ll)
+    zhu_dir = 1 if zhu else (-1 if zhu_bear else 0)
+    bias20 = round(((c / m20) - 1.0) * 100.0, 2) if m20 and m20 > 0 else 0.0
     pat_sc = 3.5 if zhu else (2.2 if (c > m20 and hl) else 1.0)
 
     tc = cl[-250:]
@@ -459,7 +464,7 @@ def calc_tech(rows, tx_ret):
         "ma5": round(m5, 2), "ma20": round(m20, 2), "ma_sc": round(ma_sc, 2), "macd_sc": round(macd_sc, 2),
         "k": round(kv, 1), "d": round(dv, 1), "rsi": round(rsi, 1), "kd_sc": round(kd_sc, 2),
         "bbw": round(bbw, 2), "atr": round(atr, 2), "bb_sc": round(bb_sc, 2), "v_sc": round(v_sc, 2),
-        "gap_t": gap_t, "gap_sc": round(gap_sc, 2), "zhu": zhu, "pat_sc": round(pat_sc, 2),
+        "gap_t": gap_t, "gap_sc": round(gap_sc, 2), "zhu": zhu, "zhu_bear": zhu_bear, "zhu_dir": zhu_dir, "m20sl": round(m20sl, 2), "bias20": bias20, "pat_sc": round(pat_sc, 2),
         "vwap": round(vwap, 2), "avol": round(avol, 1), "mdd": round(mdd, 1),
         "sl": sl, "t1": t1, "t2": t2, "rr": rr, "r_sc": round(r_sc, 2)
     }
@@ -475,9 +480,263 @@ def check_60m(tk):
     if None in (b20, b60, b240, m20[-4], m60[-4], m240[-4]):
         return None
     ok = (c > b20 > b60 > b240) and (b20 > m20[-4]) and (b60 > m60[-4]) and (b240 > m240[-4])
+    bear_ok = (c < b20 < b60 < b240) and (b20 < m20[-4]) and (b60 < m60[-4]) and (b240 < m240[-4])
+    b60_dir = 1 if ok else (-1 if bear_ok else 0)
+    sl20 = round(((b20 / m20[-4]) - 1.0) * 100.0, 2) if m20[-4] > 0 else 0.0
+    bias20 = round(((c / b20) - 1.0) * 100.0, 2) if b20 > 0 else 0.0
+
+    daily_60m = {}
+    for idx in range(243, len(rows)):
+        a20, a60, a240 = m20[idx], m60[idx], m240[idx]
+        p20, p60, p240 = m20[idx - 3], m60[idx - 3], m240[idx - 3]
+        if None in (a20, a60, a240, p20, p60, p240) or a20 <= 0 or p20 <= 0:
+            continue
+        px = cl[idx]
+        d_str = rows[idx][0][:10]
+        is_b = (px > a20 > a60 > a240) and (a20 > p20) and (a60 > p60) and (a240 > p240)
+        is_s = (px < a20 < a60 < a240) and (a20 < p20) and (a60 < p60) and (a240 < p240)
+        daily_60m[d_str] = {
+            "dir": 1 if is_b else (-1 if is_s else 0),
+            "m20": round(a20, 2),
+            "bias20": round(((px / a20) - 1.0) * 100.0, 2),
+            "slope20": round(((a20 / p20) - 1.0) * 100.0, 2),
+        }
+
     return {
-        "ok": ok, "m20": round(b20, 2), "m60": round(b60, 2), "m240": round(b240, 2),
+        "ok": ok, "bear_ok": bear_ok, "dir": b60_dir,
+        "m20": round(b20, 2), "m60": round(b60, 2), "m240": round(b240, 2),
+        "slope20": sl20, "bias20": bias20, "daily_60m": daily_60m,
         "bars": [{"t": r[0], "o": round(r[1], 2), "h": round(r[2], 2), "l": round(r[3], 2), "c": round(r[4], 2), "v": int(r[5] // 1000)} for r in rows[-180:]]
+    }
+
+
+def run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt):
+    """
+    V21.5 雙流共振（朱家泓日K × 60分K三刀流）50 檔近 3 個月多空網格回測與最佳提醒數值引擎
+    - 零前視偏誤（Zero Look-Ahead）：第 t 日收盤觸發，T+1 ~ T+5 追蹤出場，扣除台股雙邊成本 0.4425%
+    - 分層抽樣 50 檔跨產業高流動性代表股（強勢/中性/弱勢均衡覆蓋），避免單邊或倖存者偏誤
+    """
+    COST_PCT = 0.4425
+    HOLD_DAYS = 5
+    LOOKBACK_DAYS = 63
+
+    liq = [s for s in stocks if s.get("lots", 0) >= 500 and s.get("tp") != "ETF" and s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 95]
+    if len(liq) < 20:
+        liq = [s for s in stocks if s["code"] in daily_cache_mem and len(daily_cache_mem[s["code"]]) >= 95]
+
+    core_priority = ["2330", "2317", "2454", "2308", "2382", "2412", "2597", "2610", "2618", "2881", "2882", "2603", "3023", "6614", "1477", "2891", "2303", "3711"]
+    liq_map = {s["code"]: s for s in liq}
+    picked, picked_set = [], set()
+    for c in core_priority:
+        if c in liq_map and c not in picked_set:
+            picked.append(liq_map[c])
+            picked_set.add(c)
+
+    liq_sorted = sorted(liq, key=lambda x: (x.get("v21", 50), x.get("lots", 0)), reverse=True)
+    n = len(liq_sorted)
+    buckets = [
+        (sorted(liq_sorted[:max(1, n // 3)], key=lambda x: x["lots"], reverse=True), 30),
+        (sorted(liq_sorted[n // 3: max(2, 2 * n // 3)], key=lambda x: x["lots"], reverse=True), 40),
+        (sorted(liq_sorted[max(2, 2 * n // 3):], key=lambda x: x["lots"], reverse=True), 50),
+    ]
+    for bkt, cap in buckets:
+        for s in bkt:
+            if len(picked) >= cap:
+                break
+            if s["code"] not in picked_set:
+                picked.append(s)
+                picked_set.add(s["code"])
+    picked = picked[:50]
+
+    need_60m = [s for s in picked if s["code"] not in k60_state_mem]
+    if need_60m:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            fm = {ex.submit(check_60m, s["tk"]): s for s in need_60m}
+            for f in as_completed(fm):
+                s = fm[f]
+                try:
+                    res = f.result()
+                    if res and res.get("daily_60m"):
+                        k60_state_mem[s["code"]] = res
+                except Exception:
+                    pass
+
+    bull_events, bear_events = [], []
+    start_dt_seen, end_dt_seen = "9999-99-99", "0000-00-00"
+    used_60m_cnt = 0
+
+    for s in picked:
+        code = s["code"]
+        bars = daily_cache_mem.get(code, [])
+        if len(bars) < 95:
+            continue
+        k60_info = k60_state_mem.get(code)
+        d60_map = k60_info.get("daily_60m", {}) if k60_info else {}
+        if d60_map:
+            used_60m_cnt += 1
+
+        cl = [b["c"] for b in bars]
+        hi = [b["h"] for b in bars]
+        lo = [b["l"] for b in bars]
+        vo = [b["v"] for b in bars]
+        ma5 = sma(cl, 5)
+        ma10 = sma(cl, 10)
+        ma20 = sma(cl, 20)
+        ma60 = sma(cl, 60)
+
+        end_idx = len(bars) - HOLD_DAYS - 1
+        start_idx = max(62, end_idx - LOOKBACK_DAYS)
+        if start_idx >= end_idx:
+            continue
+
+        if bars[start_idx]["t"] < start_dt_seen:
+            start_dt_seen = bars[start_idx]["t"]
+        if bars[end_idx]["t"] > end_dt_seen:
+            end_dt_seen = bars[end_idx]["t"]
+
+        for t in range(start_idx, end_idx + 1):
+            c = cl[t]
+            m5, m10, m20, m60 = ma5[t], ma10[t], ma20[t], ma60[t]
+            m20p = ma20[t - 4]
+            if None in (m5, m10, m20, m60, m20p) or c <= 0 or m20 <= 0 or m20p <= 0:
+                continue
+
+            m20sl = (m20 / m20p - 1.0) * 100.0
+            hh = max(hi[t - 9:t + 1]) > max(hi[t - 24:t - 9])
+            hl = min(lo[t - 9:t + 1]) > min(lo[t - 24:t - 9])
+            lh = max(hi[t - 9:t + 1]) < max(hi[t - 24:t - 9])
+            ll = min(lo[t - 9:t + 1]) < min(lo[t - 24:t - 9])
+
+            zhu_bull = (c > m5 > m10 > m20) and (m20sl > 0) and hh and hl
+            zhu_bear = (c < m5 < m10 < m20) and (m20sl < 0) and lh and ll
+            if not zhu_bull and not zhu_bear:
+                continue
+
+            dt_t = bars[t]["t"]
+            st60 = d60_map.get(dt_t)
+            if st60:
+                b60_dir = st60["dir"]
+                bias = st60["bias20"]
+                slope = st60["slope20"]
+            else:
+                b60_dir = 1 if (c > m5 > m20 > m60 and m20sl > 0) else (-1 if (c < m5 < m20 < m60 and m20sl < 0) else 0)
+                bias = round((c / m20 - 1.0) * 100.0, 2)
+                slope = round(m20sl, 2)
+
+            v5_avg = sum(vo[t - 5:t]) / 5.0
+            vr = round(vo[t] / v5_avg, 2) if v5_avg > 0 else 1.0
+            fwd = []
+            for k in range(1, HOLD_DAYS + 1):
+                fb = bars[t + k]
+                f60 = d60_map.get(fb["t"])
+                fwd.append({
+                    "h": fb["h"], "l": fb["l"], "c": fb["c"],
+                    "m20_60": f60["m20"] if f60 else (ma20[t + k] or fb["c"])
+                })
+
+            ev = {"code": code, "dt": dt_t, "entry": c, "bias": bias, "vr": vr, "slope": slope, "fwd": fwd}
+            if zhu_bull and b60_dir == 1:
+                bull_events.append(ev)
+            elif zhu_bear and b60_dir == -1:
+                bear_events.append(ev)
+
+    def eval_grid(events, direction):
+        grid_results = []
+        for bias_lim in (3.5, 5.0, 7.0):
+            for vr_min in (0.9, 1.2, 1.5):
+                for slope_min in (0.0, 0.3):
+                    for sl_pct in (3.0, 4.0):
+                        rets = []
+                        for ev in events:
+                            if direction == 1:
+                                if not (0 <= ev["bias"] <= bias_lim and ev["vr"] >= vr_min and ev["slope"] >= slope_min):
+                                    continue
+                                entry = ev["entry"]
+                                sl_px = entry * (1.0 - sl_pct / 100.0)
+                                exit_px = ev["fwd"][-1]["c"]
+                                for fb in ev["fwd"]:
+                                    if fb["l"] <= sl_px:
+                                        exit_px = sl_px
+                                        break
+                                    if fb["c"] < fb["m20_60"]:
+                                        exit_px = fb["c"]
+                                        break
+                                rets.append(((exit_px / entry) - 1.0) * 100.0 - COST_PCT)
+                            else:
+                                if not (-bias_lim <= ev["bias"] <= 0 and ev["vr"] >= vr_min and ev["slope"] <= -slope_min):
+                                    continue
+                                entry = ev["entry"]
+                                sl_px = entry * (1.0 + sl_pct / 100.0)
+                                exit_px = ev["fwd"][-1]["c"]
+                                for fb in ev["fwd"]:
+                                    if fb["h"] >= sl_px:
+                                        exit_px = sl_px
+                                        break
+                                    if fb["c"] > fb["m20_60"]:
+                                        exit_px = fb["c"]
+                                        break
+                                rets.append(((entry - exit_px) / entry) * 100.0 - COST_PCT)
+
+                        cnt = len(rets)
+                        if cnt == 0:
+                            continue
+                        wins = [x for x in rets if x > 0]
+                        losses = [x for x in rets if x <= 0]
+                        win_rate = round(len(wins) / cnt * 100.0, 1)
+                        avg_ret = round(sum(rets) / cnt, 2)
+                        gross_win = sum(wins)
+                        gross_loss = abs(sum(losses))
+                        pf = round(gross_win / gross_loss, 2) if gross_loss > 0.001 else (9.99 if gross_win > 0 else 0.0)
+                        max_loss = round(min(rets), 2)
+                        sample_bonus = min(1.0, cnt / 10.0)
+                        obj = round((avg_ret * 2.2 + (min(pf, 4.0) - 1.0) * 1.8 + (win_rate - 50.0) * 0.06) * sample_bonus, 3)
+                        grid_results.append({
+                            "biasMax": bias_lim if direction == 1 else -bias_lim,
+                            "vrMin": vr_min,
+                            "slopeMin": slope_min if direction == 1 else -slope_min,
+                            "slPct": sl_pct,
+                            "trades": cnt,
+                            "winRate": win_rate,
+                            "avgRet": avg_ret,
+                            "pf": pf,
+                            "maxLoss": max_loss,
+                            "score": obj,
+                        })
+
+        valid = [g for g in grid_results if g["trades"] >= 6] or [g for g in grid_results if g["trades"] >= 2] or grid_results
+        valid.sort(key=lambda x: (x["score"], x["pf"], x["winRate"], x["trades"]), reverse=True)
+        if valid:
+            best = valid[0]
+        else:
+            best = {
+                "biasMax": 5.0 if direction == 1 else -5.0,
+                "vrMin": 1.2,
+                "slopeMin": 0.3 if direction == 1 else -0.3,
+                "slPct": 3.0,
+                "trades": 0, "winRate": 0.0, "avgRet": 0.0, "pf": 0.0, "maxLoss": 0.0, "score": 0.0,
+                "fallback": True
+            }
+        return best, valid[:5]
+
+    best_bull, bull_top5 = eval_grid(bull_events, 1)
+    best_bear, bear_top5 = eval_grid(bear_events, -1)
+
+    return {
+        "calibrated": True,
+        "tradeDate": trade_dt,
+        "windowStart": start_dt_seen if start_dt_seen != "9999-99-99" else trade_dt,
+        "windowEnd": end_dt_seen if end_dt_seen != "0000-00-00" else trade_dt,
+        "sampleSize": len(picked),
+        "real60mCount": used_60m_cnt,
+        "holdDays": HOLD_DAYS,
+        "costPct": COST_PCT,
+        "bullTotalSignals": len(bull_events),
+        "bearTotalSignals": len(bear_events),
+        "sampleCodes": [f"{s['code']} {s['name']}" for s in picked],
+        "bestBull": {**best_bull, "v21Min": 58},
+        "bestBear": {**best_bear, "v21Max": 45},
+        "bullTop5": bull_top5,
+        "bearTop5": bear_top5,
     }
 
 
@@ -853,26 +1112,61 @@ def main():
     liq = [s for s in stocks if s["lots"] >= MIN_VOL_LOTS and s["tp"] == "股票"]
     if len(liq) < 10:
         liq = [s for s in stocks if s["tp"] == "股票"]
-    pool = sorted(liq, key=lambda x: (x["v21"], x["rs_rk"]), reverse=True)[:TOP_60M_LIMIT]
+    for s in stocks:
+        s["b60_bear"], s["b60_dir"], s["b60_sl"], s["b60_bias"] = False, 0, s.get("m20sl", 0.0), s.get("bias20", 0.0)
+    bull_pool = sorted(liq, key=lambda x: (x["v21"], x["rs_rk"]), reverse=True)[:TOP_60M_LIMIT]
+    bear_pool = sorted([x for x in liq if x.get("zhu_bear")], key=lambda x: (x["lots"], -x["v21"]), reverse=True)[:20]
+    pool = list({s["code"]: s for s in bull_pool + bear_pool}.values())
 
-    log(f"⚔️ [5/6] 驗證前 {len(pool)} 檔強勢股 60分K 均線三刀流(20/60/240MA)...")
+    log(f"⚔️ [5/6] 雙向驗證 {len(pool)} 檔多空候選股 60分K 均線三刀流(20/60/240MA)...")
     k60_cache_mem = {}
+    k60_state_mem = {}
     with ThreadPoolExecutor(max_workers=8) as ex:
         fm = {ex.submit(check_60m, s["tk"]): s for s in pool}
         for f in as_completed(fm):
             s = fm[f]
             res = f.result()
             if res:
+                k60_state_mem[s["code"]] = res
+                s["b60_dir"] = res.get("dir", 0)
+                s["b60_sl"] = res.get("slope20", 0.0)
+                s["b60_bias"] = res.get("bias20", s.get("bias20", 0.0))
+                s["bm"] = [res["m20"], res["m60"], res["m240"]]
                 if res["ok"]:
                     s["b60"] = True
                     s["b60s"] = f"✅ 三刀多頭({res['m20']}/{res['m60']}/{res['m240']})"
-                    s["bm"] = [res["m20"], res["m60"], res["m240"]]
                     s["p5"][3] = round(min(21.0, s["p5"][3] + 1.5), 1)
                     s["v21"] = round(min(100.0, sum(s["p5"])), 1)
+                elif res.get("bear_ok"):
+                    s["b60_bear"] = True
+                    s["b60s"] = f"🔻 三刀空頭({res['m20']}/{res['m60']}/{res['m240']})"
                 else:
-                    s["b60s"] = "⚠️ 待轉強"
+                    s["b60s"] = "⚠️ 整理待轉"
                 if res.get("bars"):
                     k60_cache_mem[s["code"]] = res["bars"]
+
+    log("🧪 執行雙流共振 50 檔個股近 3 個月多空網格回測，尋找最佳提醒數值...")
+    dual_bt = run_dual_backtest_50(stocks, daily_cache_mem, k60_state_mem, trade_dt)
+    _smap = {s["code"]: s for s in stocks}
+    for code, res in k60_state_mem.items():
+        st = _smap.get(code)
+        if not st or st.get("b60s") != "未掃描":
+            continue
+        st["b60_dir"] = res.get("dir", 0)
+        st["b60_sl"] = res.get("slope20", 0.0)
+        st["b60_bias"] = res.get("bias20", st.get("bias20", 0.0))
+        st["bm"] = [res["m20"], res["m60"], res["m240"]]
+        if res.get("ok"):
+            st["b60"] = True
+            st["b60s"] = f"✅ 三刀多頭({res['m20']}/{res['m60']}/{res['m240']})"
+        elif res.get("bear_ok"):
+            st["b60_bear"] = True
+            st["b60s"] = f"🔻 三刀空頭({res['m20']}/{res['m60']}/{res['m240']})"
+        else:
+            st["b60s"] = "⚠️ 整理待轉"
+        if res.get("bars") and code not in k60_cache_mem:
+            k60_cache_mem[code] = res["bars"]
+    log(f"🏆 50檔3月回測完成！看漲最佳：乖離≤+{dual_bt['bestBull']['biasMax']}% / 量比≥{dual_bt['bestBull']['vrMin']}x（勝率{dual_bt['bestBull']['winRate']}%、PF {dual_bt['bestBull']['pf']}）｜看跌最佳：負乖離≥{dual_bt['bestBear']['biasMax']}% / 量比≥{dual_bt['bestBear']['vrMin']}x（勝率{dual_bt['bestBear']['winRate']}%、PF {dual_bt['bestBear']['pf']}）")
 
     rs20 = sorted(liq, key=lambda x: (x["rs_rk"], x["v21"]), reverse=True)[:20]
     top10 = sorted(liq, key=lambda x: (x["b60"], x["v21"], x["rs_rk"]), reverse=True)[:10]
@@ -964,7 +1258,8 @@ def main():
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
-        "version": "V21.3",
+        "version": "V21.5",
+        "dualAlert": dual_bt,
         "date": trade_dt,
         "generatedAt": f"{ts_now} (GitHub自動同步)",
         "sampleCount": len(stocks),
@@ -1004,15 +1299,17 @@ def main():
         "dt": r["dt"], "c": r["code"], "n": r["name"], "m": r["mkt"], "i": r["ind"],
         "p": r["price"], "ch": r["chg"], "v": r["lots"], "vr": r["vr"], "rs": r["rs_rk"], "s": r["v21"],
         "p5": r["p5"], "m20": r["ma20"], "mc": round(r["mc"]),
-        "z": r["zhu"], "b": r["b60s"], "bm": r["bm"], "fl": r["fl"], "tl": r["tl"], "il": r["il"],
+        "z": r["zhu"], "zd": r.get("zhu_dir", 1 if r["zhu"] else 0), "bd": r.get("b60_dir", 1 if r["b60"] else 0), "bsl": r.get("b60_sl", r.get("m20sl", 0.0)), "bb": r.get("b60_bias", r.get("bias20", 0.0)), "b": r["b60s"], "bm": r["bm"], "fl": r["fl"], "tl": r["tl"], "il": r["il"],
         "vw": r["vwap"], "sl": r["sl"], "t1": r["t1"], "t2": r["t2"], "g": r["gap_t"]
     } for r in sorted_stocks]
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.3 自動更新 {trade_dt}（同步率 {sync_rate}%）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.5 自動更新 {trade_dt}（同步率 {sync_rate}%｜含50檔3月回測）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
+    with open(os.path.join(DATA_DIR, "dual_alert_backtest.json"), "w", encoding="utf-8") as f:
+        json.dump(dual_bt, f, ensure_ascii=False, indent=2)
 
     # 2. V21.3 kline_bundle.json: Include TAIEX & OTC real daily bars + Top20/Core daily & 60m real bars!
     bundle_codes = set([r["code"] for r in top10] + [r["code"] for r in rs20[:10]] + ["2330", "2317", "2454", "2308", "2303", "2382", "3711", "2412", "2597", "2610", "2618", "1303", "2881", "2882", "6614", "3023"])
@@ -1085,6 +1382,13 @@ def main():
     md += ["\n## 13｜市場風險警示"] + [f"- {x}" for x in ra]
     md += ["\n## 14｜隔日操作策略", f"- **建議倉位**：**{pos}**；開盤前 30 分鐘不追高，鎖定突破 TOP3 與主升段 TOP10，回測日均價或 60分K 20MA 承接並嚴守 **3% 停損**。\n", "## 15｜模型預測與實際結果檢討"] + rev_l
 
+    bb_b, bb_s = dual_bt["bestBull"], dual_bt["bestBear"]
+    md += [
+        "\n## 16｜雙流共振 50 檔近 3 個月回測與最佳多空提醒數值",
+        f"- **回測樣本**：`{dual_bt['sampleSize']}` 檔跨產業高流動性代表股（實測 60分K `{dual_bt['real60mCount']}` 檔）｜區間：`{dual_bt['windowStart']}` ～ `{dual_bt['windowEnd']}`｜持有上限 `{dual_bt['holdDays']}` 日｜已扣台股手續費與證交稅 `{dual_bt['costPct']}%`。",
+        f"- **🚀 看漲雙流共振最佳提醒數值**：乖離率 `0% ～ +{bb_b['biasMax']}%`、量比 `≥ {bb_b['vrMin']}x`、60分K 20MA 斜率 `≥ +{bb_b['slopeMin']}%`、停損 `{bb_b['slPct']}%`（近3月觸發 `{bb_b['trades']}` 次｜勝率 **`{bb_b['winRate']}%`**｜平均淨報酬 **`{bb_b['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_b['pf']}`**）。",
+        f"- **🔻 看跌雙流共振最佳提醒數值**：負乖離 `{bb_s['biasMax']}% ～ 0%`、破線量比 `≥ {bb_s['vrMin']}x`、60分K 20MA 斜率 `≤ {bb_s['slopeMin']}%`、反彈停損 `{bb_s['slPct']}%`（近3月觸發 `{bb_s['trades']}` 次｜勝率 **`{bb_s['winRate']}%`**｜平均淨報酬 **`{bb_s['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_s['pf']}`**）。",
+    ]
     with open(os.path.join(DATA_DIR, "V21_最新每日報告.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
 
