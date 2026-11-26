@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-V21.3 GitHub Actions 雲端全自動盤後更新引擎（純 Python 內建、零外部套件依賴）
+V21.8.2 GitHub Actions 雲端全自動盤後更新引擎（純 Python 內建、零外部套件依賴）
 ================================================================================
-V21.3 升級項目：
+V21.8.2 升級項目：
 1. 【大盤＋個股真實 K 線整合包】data/kline_bundle.json 新增 TAIEX（加權指數）與 OTC（櫃買指數）
    近 260 日真實日 K，並收錄 TOP10、RS 前 10 與核心權值股之真實日 K（160根）與 60分K（180根）。
 2. 【全市場個股五構面得分拆解】每檔個股額外輸出 p5=[宏觀,籌碼,技術,主升基本,風控]、
@@ -11,7 +11,7 @@ V21.3 升級項目：
 4. 【TAIFEX 外資期貨斷檔自動回溯】若非盤後時段或期交所表單延遲，自動承接最近有效交易日淨未平倉並標註日期。
 ================================================================================
 """
-import csv, json, math, os, re, ssl, sys, time, urllib.parse, urllib.request
+import csv, io, json, math, os, re, ssl, sys, time, urllib.parse, urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
@@ -116,6 +116,372 @@ def get_json(url, to=15):
             if attempt == 0:
                 time.sleep(0.5)
     return None
+
+
+def get_text(url, to=15, data=None, encodings=("utf-8-sig", "cp950", "big5", "utf-8")):
+    for attempt in range(2):
+        try:
+            body = urllib.parse.urlencode(data).encode("utf-8") if isinstance(data, dict) else data
+            hdrs = dict(HDR)
+            hdrs["Accept"] = "text/csv,text/plain,application/json,*/*"
+            if body is not None:
+                hdrs["Content-Type"] = "application/x-www-form-urlencoded"
+            req = urllib.request.Request(url, data=body, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=to, context=CTX) as r:
+                raw = r.read()
+                for enc in encodings:
+                    try:
+                        return raw.decode(enc)
+                    except Exception:
+                        continue
+                return raw.decode("utf-8", "replace")
+        except Exception:
+            if attempt == 0:
+                time.sleep(0.5)
+    return None
+
+
+def _scale_twd_to_yi(val, unit_hint=""):
+    """自動將台幣元或千元換算為『億元』"""
+    if val is None:
+        return None
+    if "億" in unit_hint:
+        return round(float(val), 2)
+    if "千" in unit_hint:
+        return round(float(val) / 1e5, 2)
+    # 無單位標註時依量級判定：元通常 > 1e6，千元通常在 1e3 ~ 1e7
+    if abs(val) >= 5e7:
+        return round(float(val) / 1e8, 2)
+    if abs(val) >= 5e4:
+        return round(float(val) / 1e5, 2)
+    return round(float(val), 2)
+
+
+def parse_tpex_summary_payload(obj, fallback_dt=TODAY):
+    """解析櫃買中心新版 RWD JSON（tables[0]）或舊版 OpenAPI 陣列"""
+    if isinstance(obj, dict):
+        tables = obj.get("tables") or []
+        dt_val = parse_roc_date(obj.get("date")) or fallback_dt
+        for tb in tables:
+            rows = tb.get("data") or []
+            if not rows:
+                continue
+            title_hint = str(tb.get("title") or "") + " " + " ".join(str(x) for x in (tb.get("fields") or []))
+            fields = [str(x) for x in (tb.get("fields") or [])]
+            diff_idx = next((i for i, x in enumerate(fields) if ("買賣超" in x or "差額" in x or "淨額" in x)), -1)
+            f_v, t_v, tot_v = None, None, None
+            for row in rows:
+                if not isinstance(row, list) or len(row) < 2:
+                    continue
+                lb = str(row[0]).strip()
+                val = sf(row[diff_idx] if (diff_idx >= 0 and diff_idx < len(row)) else row[-1])
+                if val is None:
+                    continue
+                if "外資" in lb and ("不含" in lb or "合計" in lb or f_v is None):
+                    f_v = val
+                elif "投信" in lb:
+                    t_v = val
+                elif "合計" in lb and "外資" not in lb and "自營" not in lb:
+                    tot_v = val
+            if tot_v is not None or f_v is not None:
+                f_yi = _scale_twd_to_yi(f_v or 0.0, title_hint)
+                t_yi = _scale_twd_to_yi(t_v or 0.0, title_hint)
+                tot_yi = _scale_twd_to_yi(tot_v if tot_v is not None else ((f_v or 0.0) + (t_v or 0.0)), title_hint)
+                return {"dt": dt_val, "f": f_yi, "t": t_yi, "tot": tot_yi}
+    if isinstance(obj, list) and obj:
+        li = obj[-1]
+        if isinstance(li, dict):
+            dt_val = parse_roc_date(pick_val(li, ["Date", "日期"])) or fallback_dt
+            f_v = sf(pick_val(li, ["ForeignInvestorsDiff", "外資及陸資(不含外資自營商)-買賣超", "外資及陸資-買賣超", "Foreign"]))
+            t_v = sf(pick_val(li, ["SecuritiesInvestmentTrustCompaniesDiff", "投信-買賣超", "Trust"]))
+            tot_v = sf(pick_val(li, ["TotalDiff", "三大法人合計-買賣超", "三大法人-買賣超", "Total"]))
+            if tot_v is not None or f_v is not None:
+                return {
+                    "dt": dt_val,
+                    "f": _scale_twd_to_yi(f_v or 0.0, ""),
+                    "t": _scale_twd_to_yi(t_v or 0.0, ""),
+                    "tot": _scale_twd_to_yi(tot_v if tot_v is not None else ((f_v or 0.0) + (t_v or 0.0)), ""),
+                }
+    return {}
+
+
+def fetch_tpex_3insti_summary():
+    """上櫃三大法人買賣金額彙總（雙端點＋近 5 日自動回溯）"""
+    # 來源 1：TPEx 2026 RWD JSON（優先最新，再逐日回溯）
+    urls = ["https://www.tpex.org.tw/www/zh-tw/insti/summary?type=Daily&response=json"]
+    for dlt in range(5):
+        ds = (NOW_TW - timedelta(days=dlt)).strftime("%Y/%m/%d")
+        urls.append(f"https://www.tpex.org.tw/www/zh-tw/insti/summary?type=Daily&date={ds}&response=json")
+    for u in urls:
+        j = get_json(u, 12)
+        res = parse_tpex_summary_payload(j)
+        if res and (res.get("tot") is not None or res.get("f") is not None):
+            return res
+    # 來源 2：TPEx OpenAPI
+    ois = get_json("https://www.tpex.org.tw/openapi/v1/tpex_3insti_summary", 12)
+    return parse_tpex_summary_payload(ois)
+
+
+def parse_tpex_daily_payload(obj):
+    """解析櫃買中心新版 RWD JSON（24欄 / 16欄自動校驗）與 OpenAPI 個股法人明細"""
+    out = {}
+    if isinstance(obj, dict):
+        tables = obj.get("tables") or []
+        for tb in tables:
+            rows = tb.get("data") or []
+            if not rows:
+                continue
+            fields = [str(x) for x in (tb.get("fields") or [])]
+            # 動態判定欄位索引，同時兼容 24 欄（新版）與 16 欄（舊版）
+            ix_f = next((i for i, x in enumerate(fields) if "外資及陸資" in x and ("淨" in x or "買賣超" in x) and "自營" not in x), -1)
+            ix_t = next((i for i, x in enumerate(fields) if "投信" in x and ("淨" in x or "買賣超" in x)), -1)
+            ix_tot = next((i for i, x in enumerate(fields) if "三大法人" in x and ("淨" in x or "買賣超" in x or "合計" in x)), -1)
+            for row in rows:
+                if not isinstance(row, list) or len(row) < 10:
+                    continue
+                c = str(row[0]).strip()
+                if not c or not c[0].isdigit():
+                    continue
+                if ix_f >= 0 and ix_t >= 0 and ix_tot >= 0 and max(ix_f, ix_t, ix_tot) < len(row):
+                    fsh = sf(row[ix_f], 0.0)
+                    tsh = sf(row[ix_t], 0.0)
+                    tot = sf(row[ix_tot], fsh + tsh)
+                elif len(row) >= 24:
+                    # 2025-2026 TPEx RWD 標準 24 欄：[4]外資不含自營淨、[10]外資合計淨、[13]投信淨、[23]三大法人合計
+                    fsh = sf(row[10], sf(row[4], 0.0))
+                    tsh = sf(row[13], 0.0)
+                    tot = sf(row[23], fsh + tsh)
+                elif len(row) >= 16:
+                    fsh = sf(row[4], 0.0)
+                    tsh = sf(row[7], 0.0)
+                    tot = sf(row[-1], fsh + tsh)
+                else:
+                    continue
+                out[c] = {"f": round(fsh / 1000.0, 1), "t": round(tsh / 1000.0, 1), "tot": round(tot / 1000.0, 1)}
+            if out:
+                return out
+    if isinstance(obj, list):
+        for it in obj:
+            if not isinstance(it, dict):
+                continue
+            c = str(pick_val(it, ["SecuritiesCompanyCode", "代號", "股票代號", "Code"]) or "").strip()
+            if not c or not c[0].isdigit():
+                continue
+            fsh = sf(pick_val(it, [
+                "ForeignInvestorsIncludeMainlandAreaInvestorsNetBuySell",
+                "ForeignInvestorsNetBuySell",
+                "外資及陸資-買賣超股數",
+                "外資及陸資(不含外資自營商)-買賣超股數",
+                "外資及陸資買賣超股數",
+            ]), 0.0)
+            tsh = sf(pick_val(it, [
+                "SecuritiesInvestmentTrustCompaniesNetBuySell",
+                "投信-買賣超股數",
+                "投信買賣超股數",
+            ]), 0.0)
+            tot = sf(pick_val(it, [
+                "TotalNetBuySell",
+                "三大法人買賣超股數合計",
+                "三大法人買賣超股數",
+            ]), fsh + tsh)
+            out[c] = {"f": round(fsh / 1000.0, 1), "t": round(tsh / 1000.0, 1), "tot": round(tot / 1000.0, 1)}
+    return out
+
+
+def fetch_tpex_3insti_daily():
+    """上櫃個股三大法人買賣超明細（雙端點＋近 5 日自動回溯）"""
+    urls = ["https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade?type=Daily&sect=EW&response=json"]
+    for dlt in range(5):
+        ds = (NOW_TW - timedelta(days=dlt)).strftime("%Y/%m/%d")
+        urls.append(f"https://www.tpex.org.tw/www/zh-tw/insti/dailyTrade?type=Daily&sect=EW&date={ds}&response=json")
+    for u in urls:
+        j = get_json(u, 15)
+        res = parse_tpex_daily_payload(j)
+        if len(res) >= 50:
+            return res
+    oid = get_json("https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading", 15)
+    return parse_tpex_daily_payload(oid)
+
+
+def parse_taifex_csv_foreign_tx(csv_text, fallback_dt=TODAY):
+    """解析期交所 futContractsDateDown CSV 取得外資臺股期貨（大台）淨未平倉口數"""
+    if not csv_text or ("臺股期貨" not in csv_text and "台股期貨" not in csv_text):
+        return {}
+    rows = list(csv.reader(io.StringIO(csv_text)))
+    if len(rows) < 2:
+        return {}
+    hdr = [c.strip() for c in rows[0]]
+    ix_l = next((i for i, h in enumerate(hdr) if "多方未平倉" in h and "口數" in h), 9)
+    ix_s = next((i for i, h in enumerate(hdr) if "空方未平倉" in h and "口數" in h), 11)
+    ix_net = next((i for i, h in enumerate(hdr) if "未平倉" in h and "淨額" in h and "口數" in h), 13)
+    for row in rows[1:]:
+        if len(row) <= max(ix_l, ix_s, ix_net):
+            continue
+        joined = " ".join(row[:4])
+        if ("臺股期貨" in joined or "台股期貨" in joined) and "小型" not in joined and "微型" not in joined and "外資" in joined:
+            dt_v = parse_roc_date(row[0]) or fallback_dt
+            lv = sf(row[ix_l], 0.0)
+            sv = sf(row[ix_s], 0.0)
+            nv = sf(row[ix_net])
+            if nv is None:
+                nv = lv - sv
+            return {"dt": dt_v, "net": int(nv), "l": int(lv), "s": int(sv)}
+    return {}
+
+
+def fetch_taifex_foreign_tx():
+    """外資臺股期貨淨未平倉（三重備援：TAIFEX 官網 CSV → TAIFEX OpenAPI → FinMind 公開 API）"""
+    # 來源 1：TAIFEX 官網 futContractsDateDown CSV（近 6 日回溯，支援 GET 與 POST）
+    for dlt in range(6):
+        dt_obj = NOW_TW - timedelta(days=dlt)
+        ds = dt_obj.strftime("%Y/%m/%d")
+        ds_iso = dt_obj.strftime("%Y-%m-%d")
+        qs = urllib.parse.urlencode({"queryStartDate": ds, "queryEndDate": ds, "commodityId": "TXF"})
+        txt = get_text(f"https://www.taifex.com.tw/cht/3/futContractsDateDown?{qs}", 12, encodings=("cp950", "big5", "utf-8-sig"))
+        res = parse_taifex_csv_foreign_tx(txt, ds_iso)
+        if res:
+            return res
+        txt_post = get_text(
+            "https://www.taifex.com.tw/cht/3/futContractsDateDown",
+            12,
+            data={"queryStartDate": ds, "queryEndDate": ds, "commodityId": "TXF", "commodity_id": "TXF", "down_type": "1"},
+            encodings=("cp950", "big5", "utf-8-sig"),
+        )
+        res = parse_taifex_csv_foreign_tx(txt_post, ds_iso)
+        if res:
+            return res
+
+    # 來源 2：TAIFEX OpenAPI
+    tf = get_json("https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate", 12)
+    res = parse_taifex_foreign_tx(tf)
+    if res:
+        return res
+
+    # 來源 3：FinMind 免費公開 API
+    sd = (NOW_TW - timedelta(days=12)).strftime("%Y-%m-%d")
+    fm = get_json(f"https://api.finmindtrade.com/api/v4/data?dataset=TaiwanFuturesInstitutionalInvestors&data_id=TX&start_date={sd}", 12)
+    if isinstance(fm, dict) and isinstance(fm.get("data"), list):
+        f_rows = [r for r in fm["data"] if "Foreign" in str(r.get("institutional_investors", ""))]
+        if f_rows:
+            f_rows.sort(key=lambda x: str(x.get("date", "")))
+            last = f_rows[-1]
+            lv = sf(last.get("long_open_interest_balance_volume"), 0.0)
+            sv = sf(last.get("short_open_interest_balance_volume"), 0.0)
+            return {"dt": str(last.get("date", TODAY))[:10], "net": int(lv - sv), "l": int(lv), "s": int(sv)}
+    return {}
+
+
+def analyze_us_market_impact(gsum, trade_dt):
+    """
+    V21.8.2 美股最新收盤連動分析引擎（每日 06:00 CST 美股收盤後自動納入評分與開盤預判）
+    ================================================================================
+    - 依據 TSM ADR (35%)、費城半導體 SOX (30%)、輝達 NVDA (20%)、那斯達克 NASDAQ (15%)
+      計算「美股科技對台股傳導脈衝 (impulsePct)」，並結合美債10Y (^TNX) 與台幣匯率 (TWD=X)
+      判定開盤風向、自動加減宏觀評分（指標 04）並寫入首頁風險警示與操作策略。
+    ================================================================================
+    """
+    def _chg(k):
+        return gsum.get(k, {}).get("chg")
+
+    def _val(k):
+        return gsum.get(k, {}).get("c")
+
+    us_dates = [gsum[k]["dt"] for k in ("SOX", "TSM", "NVDA", "NASDAQ", "SP500", "DJI") if k in gsum and gsum[k].get("dt")]
+    us_dt = max(us_dates) if us_dates else trade_dt
+
+    comp = [("TSM", 0.35), ("SOX", 0.30), ("NVDA", 0.20), ("NASDAQ", 0.15)]
+    w_sum, v_sum = 0.0, 0.0
+    for k, w in comp:
+        ch = _chg(k)
+        if ch is not None:
+            v_sum += ch * w
+            w_sum += w
+    impulse = round(v_sum / w_sum, 2) if w_sum > 0 else 0.0
+
+    sox_ch = _chg("SOX") or 0.0
+    tsm_ch = _chg("TSM") or 0.0
+    nvda_ch = _chg("NVDA") or 0.0
+    ixic_ch = _chg("NASDAQ") or 0.0
+    spx_ch = _chg("SP500") or 0.0
+    u10 = _val("US10Y") or 4.5
+    u10_ch = _chg("US10Y") or 0.0
+    twd = _val("USDTWD") or 32.0
+
+    # 判定目前處於「美股晨間開盤前預判」還是「台股盤後覆核」
+    is_pre_open = (NOW_TW.hour < 14) or (us_dt >= trade_dt)
+    session_mode = "PRE_OPEN" if is_pre_open else "POST_CLOSE"
+    session_label = "☀️ 美股晨間開盤前預判" if is_pre_open else "🌙 盤後美股基準覆核"
+
+    if impulse >= 2.0:
+        tone, tone_label, score_delta, alert_lvl = "STRONG_BULL", "🚀 美股科技強攻・有利台股開高", 0.8, "ok"
+        est_open = "預估台股半導體與 AI 權值股開盤具強勁跳空反彈動能，惟防開高後短線獲利賣壓，觀察 09:30 後是否守穩早盤均價。"
+        action_note = "開盤若跳空大漲勿追市價，待 09:30 回測日均價不破且 2,000 檔廣度擴張，再依位階倉位上限擇優承接。"
+    elif impulse >= 0.7:
+        tone, tone_label, score_delta, alert_lvl = "MILD_BULL", "📈 美股偏多收紅・有助短線止穩", 0.4, "ok"
+        est_open = "美股科技股溫和收紅，有助緩和台股電子權值賣壓，盤中觀察台積電與 OTC 中小型股是否同步轉強。"
+        action_note = "順勢觀察強勢雙流股與抗跌主流，仍須嚴守目前位階總倉位上限。"
+    elif impulse > -0.7:
+        tone, tone_label, score_delta, alert_lvl = "NEUTRAL", "⚖️ 美股震盪中性・回歸台股內資", 0.0, "ok"
+        est_open = "美股漲跌互見、外部干擾中性，台股開盤預計回歸自身均線支撐與內資族群輪動表現。"
+        action_note = "依台股自身 60分K 三刀流與 3% 停損紀律執行，不預設多空立場。"
+    elif impulse > -2.0:
+        tone, tone_label, score_delta, alert_lvl = "MILD_BEAR", "⚠️ 美股科技偏弱・留意開盤壓回", -0.4, "warn"
+        est_open = "費半／ADR 收黑，台股電子權值開盤易承壓震盪，切忌開盤急拉搶反彈。"
+        action_note = "開盤前 30 分鐘以觀望防禦為主，優先檢視持股是否跌破 60分K 20MA 或 3% 停損位。"
+    else:
+        tone, tone_label, score_delta, alert_lvl = "STRONG_BEAR", "🚨 美股半導體重挫・嚴防開盤跳空殺盤", -0.8, "danger"
+        est_open = "費半與台積電 ADR 同步重挫，台股開盤面臨跳空下殺與外資提款高壓，半導體／AI 族群慎防開低走低。"
+        action_note = "嚴禁早盤抄底接刀，務必保留高比例現金並嚴格執行弱勢持股減碼與破線停損。"
+
+    semi_div = round(sox_ch - spx_ch, 2)
+    extra_notes = []
+    if semi_div <= -2.5:
+        extra_notes.append(f"費半明顯落後標普 {semi_div:+.2f}%（半導體遭針對性提款）")
+    elif semi_div >= 2.5:
+        extra_notes.append(f"費半大幅領先標普 {semi_div:+.2f}%（資金回流半導體主流）")
+    if u10 >= 4.5:
+        extra_notes.append(f"美債10Y 維持高檔 {u10}%（{u10_ch:+.2f}%）壓抑估值")
+    if twd >= 32.5:
+        extra_notes.append(f"台幣偏貶 {twd} 不利外資回補")
+
+    extra_txt = "；".join(extra_notes)
+    headline = f"{tone_label}（傳導脈衝 {impulse:+.2f}%｜費半 {sox_ch:+.2f}%／TSM {tsm_ch:+.2f}%／NVDA {nvda_ch:+.2f}%）"
+    detail = f"美股最新收盤基準日 {us_dt}（{session_label}）。{est_open}" + (f" 附加觀察：{extra_txt}。" if extra_txt else "")
+
+    return {
+        "usDate": us_dt,
+        "sessionMode": session_mode,
+        "sessionLabel": session_label,
+        "impulsePct": impulse,
+        "tone": tone,
+        "toneLabel": tone_label,
+        "scoreDelta": score_delta,
+        "alertLevel": alert_lvl,
+        "soxChg": sox_ch,
+        "tsmChg": tsm_ch,
+        "nvdaChg": nvda_ch,
+        "nasdaqChg": ixic_ch,
+        "semiDivPct": semi_div,
+        "us10y": u10,
+        "usdtwd": twd,
+        "estOpenNote": est_open,
+        "actionNote": action_note,
+        "extraNote": extra_txt,
+        "headline": headline,
+        "detail": detail,
+    }
+
+
+def pick_conservative_pos(pos_v21, pos_regime):
+    """取『V21 總分建議倉位』與『2年位階模型建議倉位』兩者上限較低（較保守）者，確保全報告口徑 100% 一致"""
+    def _upper(s):
+        nums = [int(x) for x in re.findall(r"\d+", str(s or ""))]
+        return max(nums) if nums else 100
+    if not pos_regime:
+        return pos_v21, False
+    if _upper(pos_regime) < _upper(pos_v21):
+        return pos_regime, True
+    return pos_v21, False
 
 
 def yf_ohlcv(sym, rng="2y", iv="1d"):
@@ -306,7 +672,8 @@ def parse_taifex_foreign_tx(tf_list):
         if not isinstance(it, dict):
             continue
         vals_str = " ".join(str(v) for v in it.values())
-        if ("臺股期貨" in vals_str or "台股期貨" in vals_str or str(pick_val(it, ["ContractCode", "商品代號"]) or "").strip() == "TX") and ("外資" in vals_str or "FINI" in vals_str.upper()):
+        code_v = str(pick_val(it, ["ContractCode", "商品代號", "契約代號"]) or "").strip().upper()
+        if ("臺股期貨" in vals_str or "台股期貨" in vals_str or code_v in ("TX", "TXF")) and "小型" not in vals_str and "微型" not in vals_str and ("外資" in vals_str or "FINI" in vals_str.upper()):
             net_v = sf(pick_val(it, ["未平倉餘額多空淨額口數", "未平倉多空淨額口數", "OpenInterestNetContracts", "NetOpenInterestContracts", "NetOpenInterestLot", "NetOI"]))
             long_v = sf(pick_val(it, ["未平倉餘額多方口數", "未平倉多方口數", "OpenInterestLongPositionContracts", "LongOpenInterestContracts", "LongOpenInterestLot"]))
             short_v = sf(pick_val(it, ["未平倉餘額空方口數", "未平倉空方口數", "OpenInterestShortPositionContracts", "ShortOpenInterestContracts", "ShortOpenInterestLot"]))
@@ -882,7 +1249,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
 
     return {
         "calibrated": True,
-        "version": "V21.8.1",
+        "version": "V21.8.2",
         "tradeDate": trade_dt,
         "windowStart": bear_start_seen if bear_start_seen != "9999-99-99" else trade_dt,
         "windowEnd": bear_end_seen if bear_end_seen != "0000-00-00" else trade_dt,
@@ -922,7 +1289,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
         "bullTop5": bull_top5,
         "bearTop5": bear_top5,
     }
-def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, trade_dt):
+def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, trade_dt, us_impact=None):
     """
     V21.8.1 大盤 2 年位階回測 × 2,000 檔市場廣度與雙流共振風險警示引擎（實測微調版）
     ================================================================================
@@ -950,7 +1317,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
     ORDER = ("BULL_ATTACK", "STRONG_SURGE", "OVERHEAT", "CONSOLIDATION", "BEAR_DEFENSE", "CRASH_ALERT")
 
     if not tx_rw or len(tx_rw) < 120:
-        return {"calibrated": False, "version": "V21.8.1", "note": "大盤歷史資料不足 120 日"}
+        return {"calibrated": False, "version": "V21.8.2", "note": "大盤歷史資料不足 120 日"}
 
     dts = [r[0][:10] for r in tx_rw]
     cl = [float(r[4]) for r in tx_rw]
@@ -1281,6 +1648,16 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
             "detail": f"目前先嚴守低水位現金、絕不左側接刀；待以下條件至少亮 2 顆 ✅ 再分批加碼：{chk_txt}。"
         })
 
+    # 6. 美股最新收盤連動提醒（每日 06:00 CST 美股收盤更新後直接納入首頁風險看板）
+    if isinstance(us_impact, dict) and us_impact.get("headline"):
+        us_tag = "美股晨間預判" if us_impact.get("sessionMode") == "PRE_OPEN" else "美股連動分析"
+        risk_alerts.append({
+            "level": us_impact.get("alertLevel", "warn"),
+            "tag": us_tag,
+            "title": us_impact["headline"],
+            "detail": f"{us_impact['detail']} 應對策略：{us_impact['actionNote']}",
+        })
+
     # 綜合 V21 大盤分數做最終倉位保守取交集
     if mkt_tot < 55 and cur["rg"] in ("BULL_ATTACK", "STRONG_SURGE", "CONSOLIDATION"):
         risk_alerts.append({
@@ -1297,7 +1674,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
 
     return {
         "calibrated": True,
-        "version": "V21.8.1",
+        "version": "V21.8.2",
         "tradeDate": trade_dt,
         "windowStart": daily_states[0]["dt"],
         "windowEnd": daily_states[-1]["dt"],
@@ -1358,7 +1735,7 @@ def main():
     t0 = time.time()
     MACRO = load_macro()
     log("==================================================")
-    log("🚀 V21.3 GitHub Actions 雲端全自動盤後更新引擎啟動！")
+    log("🚀 V21.8.2 GitHub Actions 雲端全自動盤後更新引擎啟動！")
     log(f"🕒 台灣時間：{NOW_TW.strftime('%Y-%m-%d %H:%M:%S')}")
     log("==================================================")
 
@@ -1505,30 +1882,22 @@ def main():
                         inst_m[c] = {"f": round(sf(row[ixf], 0.0) / 1000.0, 1), "t": round(sf(row[ixt], 0.0) / 1000.0, 1), "tot": round(sf(row[ixtot], 0.0) / 1000.0, 1)}
             break
 
-    ois = get_json("https://www.tpex.org.tw/openapi/v1/tpex_3insti_summary", 12)
-    if isinstance(ois, list) and ois:
-        li = ois[-1]
-        f_v = sf(pick_val(li, ["ForeignInvestorsDiff", "外資及陸資(不含外資自營商)-買賣超", "Foreign"]), 0.0)
-        t_v = sf(pick_val(li, ["SecuritiesInvestmentTrustCompaniesDiff", "投信-買賣超", "Trust"]), 0.0)
-        tot_v = sf(pick_val(li, ["TotalDiff", "三大法人合計-買賣超", "Total"]), 0.0)
-        if abs(tot_v) > 1e5 or abs(f_v) > 1e5:
-            m_inst["tpex"] = {"f": round(f_v / 1e8, 2), "t": round(t_v / 1e8, 2), "tot": round(tot_v / 1e8, 2)}
+    tpex_sum = fetch_tpex_3insti_summary()
+    if tpex_sum:
+        m_inst["tpex"] = tpex_sum
+        ph["_last_tpex_inst"] = tpex_sum
+        log(f"  🏛️ 上櫃三大法人彙總：{tpex_sum.get('tot')} 億（外資 {tpex_sum.get('f')}／投信 {tpex_sum.get('t')}，基準日 {tpex_sum.get('dt')}）")
 
-    oid = get_json("https://www.tpex.org.tw/openapi/v1/tpex_3insti_daily_trading", 15)
-    if isinstance(oid, list):
-        for it in oid:
-            c = str(it.get("SecuritiesCompanyCode", "")).strip()
-            if c:
-                fsh = sf(pick_val(it, ["ForeignInvestorsIncludeMainlandAreaInvestorsNetBuySell", "ForeignInvestorsNetBuySell"]), 0.0)
-                tsh = sf(pick_val(it, ["SecuritiesInvestmentTrustCompaniesNetBuySell"]), 0.0)
-                tot = sf(pick_val(it, ["TotalNetBuySell"]), fsh + tsh)
-                inst_m[c] = {"f": round(fsh / 1000.0, 1), "t": round(tsh / 1000.0, 1), "tot": round(tot / 1000.0, 1)}
+    tpex_daily = fetch_tpex_3insti_daily()
+    if tpex_daily:
+        inst_m.update(tpex_daily)
+        log(f"  🏛️ 上櫃個股法人明細成功補齊：{len(tpex_daily)} 檔")
 
-    tf = get_json("https://openapi.taifex.com.tw/v1/MarketDataOfMajorInstitutionalTradersDetailsOfFuturesContractsBytheDate", 12)
-    tx_oi = parse_taifex_foreign_tx(tf)
+    tx_oi = fetch_taifex_foreign_tx()
     tx_oi_cached = False
     if tx_oi:
         ph["_last_taifex"] = tx_oi
+        log(f"  📈 期交所外資大台淨未平倉：{tx_oi.get('net'):+,} 口（基準日 {tx_oi.get('dt')}）")
     elif isinstance(ph.get("_last_taifex"), dict) and ph["_last_taifex"].get("net") is not None:
         tx_oi = ph["_last_taifex"]
         tx_oi_cached = True
@@ -1626,6 +1995,8 @@ def main():
         est_tot = sum(s["il"] * s["price"] / 1e5 for s in stocks if s["mkt"] == "上櫃")
         if abs(est_tot) > 0.1 or abs(est_f) > 0.1:
             m_inst["tpex"] = {"f": round(est_f, 2), "t": round(est_t, 2), "tot": round(est_tot, 2), "est": True}
+        elif isinstance(ph.get("_last_tpex_inst"), dict) and ph["_last_tpex_inst"].get("tot") is not None:
+            m_inst["tpex"] = {**ph["_last_tpex_inst"], "cached": True}
 
     log(f"🧮 [4/6] 計算全市場 RS 百分位與 V21 五構面評分...")
     pct_rank(stocks, "rs_raw", "rs_rk", 99.0)
@@ -1644,8 +2015,12 @@ def main():
     ms["02"], mn["02"] = (3, s02), f"PMI {MACRO['pmi']}%,新訂單{MACRO['pmi_new']}%(電子{MACRO['pmi_elec']}%)"
     u10 = gsum.get("US10Y", {}).get("c", 4.5)
     ms["03"], mn["03"] = (4, 3.5 if u10 < 3.8 else (2.5 if u10 < 4.5 else 1.5)), f"Fed {MACRO['fed_rate']}%,美債10Y {u10}%"
+    us_impact = analyze_us_market_impact(gsum, trade_dt)
+    log(f"  🇺🇸 美股連動分析（{us_impact['sessionLabel']}｜美股日 {us_impact['usDate']}）：{us_impact['headline']}（宏觀調整 {us_impact['scoreDelta']:+.1f} 分）")
     twd, dxy = gsum.get("USDTWD", {}).get("c", 32.0), gsum.get("DXY", {}).get("c", 103.0)
-    ms["04"], mn["04"] = (4, 3.5 if twd < 31.2 else (2.5 if twd < 32.5 else 1.5)), f"DXY {dxy},台幣 {twd}"
+    s04_base = 3.5 if twd < 31.2 else (2.5 if twd < 32.5 else 1.5)
+    s04_adj = round(max(0.5, min(4.0, s04_base + us_impact["scoreDelta"])), 1)
+    ms["04"], mn["04"] = (4, s04_adj), f"DXY {dxy},台幣 {twd},美股連動{us_impact['impulsePct']:+.2f}%(費半{us_impact['soxChg']:+.2f}%/TSM{us_impact['tsmChg']:+.2f}%)"
     txc, txch = gsum.get("TAIEX", {}).get("c", 0.0), gsum.get("TAIEX", {}).get("chg", 0.0)
     otc_c, otch = gsum.get("OTC", {}).get("c"), gsum.get("OTC", {}).get("chg", 0.0)
     ma_f, s05, tx_ma240 = [], 3.0, 0
@@ -1663,7 +2038,7 @@ def main():
     twi, oti = m_inst["twse"], m_inst["tpex"]
     tyi = twi.get("tot", 0.0) + oti.get("tot", 0.0)
     fyi, tryi = twi.get("f", 0.0), twi.get("t", 0.0)
-    otc_tag = "(估)" if oti.get("est") else ""
+    otc_tag = "(估)" if oti.get("est") else (f"(延續{oti.get('dt')})" if oti.get("cached") else "")
     ms["06"], mn["06"] = (7, 6.2 if (fyi > 50 and tryi > 10) else (4.8 if tyi > 0 else (2.5 if tyi > -300 else 1.5))), f"上市{twi.get('tot', 'N/A')}億(外{fyi}/投{tryi}),上櫃{oti.get('tot', 'N/A')}億{otc_tag}"
     noi = tx_oi.get("net")
     if noi is None:
@@ -1791,7 +2166,7 @@ def main():
             k60_cache_mem[code] = res["bars"]
     log(f"🏆 全市場 {dual_bt['sampleSize']} 檔近 3 個月回測完成（真實60分K {dual_bt['real60mCount']} 檔＋等效代理 {dual_bt['proxyCount']} 檔）！看漲最佳：乖離≤+{dual_bt['bestBull']['biasMax']}% / 量比≥{dual_bt['bestBull']['vrMin']}x（勝率{dual_bt['bestBull']['winRate']}%、PF {dual_bt['bestBull']['pf']}）｜看跌最佳：負乖離≥{dual_bt['bestBear']['biasMax']}% / 量比≥{dual_bt['bestBear']['vrMin']}x（勝率{dual_bt['bestBear']['winRate']}%、PF {dual_bt['bestBear']['pf']}）")
     log("🧭 執行大盤 2 年位階回測 × 2,000 檔市場廣度與風險警示引擎...")
-    taiex_bt = run_taiex_2y_regime_backtest(tx_rw, gfr.get("OTC", []), breadth_hist, dual_bt, mkt_tot, trade_dt)
+    taiex_bt = run_taiex_2y_regime_backtest(tx_rw, gfr.get("OTC", []), breadth_hist, dual_bt, mkt_tot, trade_dt, us_impact=us_impact)
     if taiex_bt.get("calibrated"):
         _c_rg = taiex_bt["current"]
         _svb = taiex_bt["strategyVsBuyHold"]
@@ -1839,13 +2214,16 @@ def main():
     hist_dates = sorted([d for d in ph if re.match(r"^\d{4}-\d{2}-\d{2}$", d)])[-60:]
     history_series = [{"dt": d, "ms": ph[d].get("ms", 50.0), "taiex": ph[d].get("taiex", 0.0), "above20ma": ph[d].get("above20ma", 0.0)} for d in hist_dates]
 
-    log("📝 [6/6] 正在輸出 V21.3 JSON、大盤+個股真實 K 線包與 15 項報告...")
+    log("📝 [6/6] 正在輸出 V21.8.2 JSON、大盤+個股真實 K 線包與 17 節戰情報告...")
     st_m, act_m = lbl(mkt_tot)
     ts_now = NOW_TW.strftime("%Y-%m-%d %H:%M")
-    pos = "70%～85%" if mkt_tot >= 80 else ("50%～65%" if mkt_tot >= 65 else "30%～45%")
+    pos_v21 = "70%～85%" if mkt_tot >= 80 else ("50%～65%" if mkt_tot >= 65 else "30%～45%")
+    pos_rg = taiex_bt.get("current", {}).get("posCap") if taiex_bt.get("calibrated") else None
+    pos, pos_tightened = pick_conservative_pos(pos_v21, pos_rg)
+    pos_note = f"{pos}（依 {taiex_bt['current']['regimeName']} 風控上限覆核）" if pos_tightened else pos
 
     ind_grps = {
-        "01": ("宏觀經濟", "景氣循環"), "02": ("宏觀經濟", "PMI"), "03": ("宏觀經濟", "Fed利率"), "04": ("宏觀經濟", "匯率資金"),
+        "01": ("宏觀經濟", "景氣循環"), "02": ("宏觀經濟", "PMI"), "03": ("宏觀經濟", "Fed利率"), "04": ("宏觀經濟", "匯率與美股連動"),
         "05": ("市場籌碼", "大盤與櫃買"), "06": ("市場籌碼", "三大法人"), "07": ("市場籌碼", "台指期外資"),
         "08": ("市場籌碼", "融資融券"), "09": ("市場籌碼", "主力分點(集中度)"), "10": ("市場籌碼", "產業資金流"),
         "11": ("個股技術", "RS相對強弱"), "12": ("個股技術", "均線排列"), "13": ("個股技術", "MACD"),
@@ -1877,21 +2255,30 @@ def main():
             global_list.append({"k": k, "name": g["lb"], "sym": g["sym"], "val": g["c"], "chg": g["chg"], "dt": g["dt"]})
 
     ra = []
+    if us_impact["tone"] in ("STRONG_BEAR", "MILD_BEAR"):
+        ra.append(f"美股最新收盤（{us_impact['usDate']}）偏空：{us_impact['headline']}；{us_impact['estOpenNote']}")
+    elif us_impact["tone"] == "STRONG_BULL":
+        ra.append(f"美股最新收盤（{us_impact['usDate']}）強彈：{us_impact['headline']}；留意開高短線獲利賣壓不盲追。")
     if u10 >= 4.5: ra.append(f"美債10Y殖利率 {u10}% 偏高，壓抑高估值 AI 科技股。")
     if (noi or 0) <= -40000: ra.append(f"外資台指期淨空單 {noi:,} 口，留意劇烈震盪。")
     if (twi.get("tot") or 0) <= -300: ra.append(f"上市三大法人單日賣超 {twi.get('tot')} 億（外資 {fyi} 億），留意籌碼調節。")
-    if mkt_tot < 60: ra.append(f"大盤 V21 僅 {mkt_tot} 分（{st_m}），嚴控總倉位 {pos} 不追高。")
+    if pos_tightened:
+        ra.append(f"大盤處於 {taiex_bt['current']['regimeName']}（風險 {taiex_bt['current']['riskLevel']}/5），總倉位上限強制收緊至 {pos}。")
+    elif mkt_tot < 60:
+        ra.append(f"大盤 V21 僅 {mkt_tot} 分（{st_m}），嚴控總倉位 {pos} 不追高。")
     if not ra: ra.append("系統風險可控，嚴守單筆 3% 停損紀律。")
 
     twse_tot = twi.get("tot", 0.0)
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
-        "version": "V21.8.1",
+        "version": "V21.8.2",
+        "sessionLabel": us_impact["sessionLabel"],
+        "usAnalysis": us_impact,
         "dualAlert": dual_bt,
         "marketRegime": taiex_bt,
         "date": trade_dt,
-        "generatedAt": f"{ts_now} (GitHub自動同步)",
+        "generatedAt": f"{ts_now} ({us_impact['sessionLabel']})",
         "sampleCount": len(stocks),
         "marketScore": mkt_tot,
         "prevScore": prev_mkt_score,
@@ -1917,10 +2304,10 @@ def main():
         },
         "warnings": ra,
         "strategy": [
-            f"建議總持股水位控制在 {pos}；開盤前 30 分鐘不市價追高。",
+            f"【統一風控總倉位】建議持股上限嚴守 {pos_note}；開盤前 30 分鐘不市價追高。",
+            f"【美股最新連動（{us_impact['usDate']}）】{us_impact['headline']} → {us_impact['actionNote']}",
             f"大盤年線 240MA 參考位階約 {tx_ma240:,} 點，站上月線比例 {p20}%。",
-            "優先追蹤「低乖離雙流共振＋法人買超」標的，回測日內均價或 60分K 20MA（小藍短刀）止穩承接。",
-            "所有部位嚴守朱家泓 3% 停損基準，破線立即減碼退場。"
+            "所有部位嚴守朱家泓 3% 停損與 60分K 20MA（小藍短刀）防守紀律，破線立即減碼退場。"
         ]
     }
 
@@ -1935,7 +2322,7 @@ def main():
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.8.1 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.8.2 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
     with open(os.path.join(DATA_DIR, "dual_alert_backtest.json"), "w", encoding="utf-8") as f:
@@ -1943,7 +2330,7 @@ def main():
     with open(os.path.join(DATA_DIR, "taiex_regime_backtest.json"), "w", encoding="utf-8") as f:
         json.dump(taiex_bt, f, ensure_ascii=False, indent=2)
 
-    # 2. V21.3 kline_bundle.json: Include TAIEX & OTC real daily bars + Top20/Core daily & 60m real bars!
+    # 2. V21.8.2 kline_bundle.json: Include TAIEX & OTC real daily bars + Top20/Core daily & 60m real bars!
     bundle_codes = set([r["code"] for r in top10] + [r["code"] for r in rs20[:10]] + ["2330", "2317", "2454", "2308", "2303", "2382", "3711", "2412", "2597", "2610", "2618", "1303", "2881", "2882", "6614", "3023"])
     kline_bundle = {"tradeDate": trade_dt, "indices": {}, "daily": {}, "k60m": {}}
     for ik in ("TAIEX", "OTC"):
@@ -1964,13 +2351,16 @@ def main():
     inf = sorted(ist, key=lambda x: (x["achg"], x["il"]), reverse=True)[:6]
     outf = sorted(ist, key=lambda x: (x["achg"], x["il"]))[:6]
     md = [
-        f"# 台股二十大指標最終版（V21.3 雲端全自動版）每日量化戰情報告（{trade_dt}）",
-        f"**行情基準日**：`{trade_dt}`（大盤與個股同步率 `{sync_rate}%`，✅ 0天誤差）｜**產出時間**：{ts_now}｜**有效樣本**：`{len(stocks)}` 檔｜**大盤 V21 總分**：**`{mkt_tot}/100`（{st_m}／{act_m}）**\n",
+        f"# 台股二十大指標最終版（V21.8.2 雲端全自動版）每日量化戰情報告（{trade_dt}）",
+        f"**行情基準日**：`{trade_dt}`（同步率 `{sync_rate}%`）｜**美股最新基準日**：`{us_impact['usDate']}`（{us_impact['sessionLabel']}）｜**產出時間**：{ts_now}｜**有效樣本**：`{len(stocks)}` 檔｜**大盤 V21 總分**：**`{mkt_tot}/100`（{st_m}／{act_m}）**\n",
         "---", "## 1｜全球經濟與美股"
     ]
     for g in global_list:
         md.append(f"- **{g['name']} (`{g['sym']}`)**：`{g['val']}`（`{g['chg']:+.2f}%`，`{g['dt']}`）")
-    md += [f"- **宏觀設定**：{MACRO['note']}；景氣 `{MACRO['ndc_score']}` 分（{MACRO['ndc_signal']}）、PMI `{MACRO['pmi']}%`、Fed `{MACRO['fed_rate']}%`。\n",
+    md += [
+           f"- **🇺🇸→🇹🇼 美股最新收盤連動預判（{us_impact['usDate']}｜{us_impact['sessionLabel']}）**：**{us_impact['headline']}**（已納入指標 04 評分 `{us_impact['scoreDelta']:+.1f}` 分）。{us_impact['estOpenNote']}",
+           f"- **開盤應對建議**：{us_impact['actionNote']}",
+           f"- **宏觀設定**：{MACRO['note']}；景氣 `{MACRO['ndc_score']}` 分（{MACRO['ndc_signal']}）、PMI `{MACRO['pmi']}%`、Fed `{MACRO['fed_rate']}%`。\n",
            "## 2｜台股大盤趨勢",
            f"- **加權指數**：`{txc:,.2f}`（`{txch:+.2f}%`，`{trade_dt}`）｜**櫃買指數**：`{otc_disp}`",
            f"- **市場廣度**：漲 `{br['up']}`／跌 `{br['down']}`／漲停 `{br['lu']}` 家。\n",
@@ -2012,14 +2402,19 @@ def main():
         bh = round(r["price"] * 1.015, 2)
         md.append(f"| **{r['code']} {r['name']}** | {r['price']} | {bl}～{bh} | {r['vwap']} | **{r['sl']}** | {r['t1']} | {r['t2']} | {r['rr']}x | 破{r['sl']}或60分K破20MA |")
     md += ["\n## 13｜市場風險警示"] + [f"- {x}" for x in ra]
-    md += ["\n## 14｜隔日操作策略", f"- **建議倉位**：**{pos}**；開盤前 30 分鐘不追高，鎖定突破 TOP3 與主升段 TOP10，回測日均價或 60分K 20MA 承接並嚴守 **3% 停損**。\n", "## 15｜模型預測與實際結果檢討"] + rev_l
+    md += [
+        "\n## 14｜隔日／開盤操作策略",
+        f"- **統一建議總倉位**：**{pos_note}**；開盤前 30 分鐘不追高，鎖定突破 TOP3 與主升段 TOP10，回測日均價或 60分K 20MA 承接並嚴守 **3% 停損**。",
+        f"- **美股最新連動應對（{us_impact['usDate']}）**：{us_impact['actionNote']}\n",
+        "## 15｜模型預測與實際結果檢討",
+    ] + rev_l
 
     bb_b, bb_s = dual_bt["bestBull"], dual_bt["bestBear"]
     md += [
         f"\n## 16｜雙流共振全市場 {dual_bt['sampleSize']:,} 檔近 3 個月回測與最佳多空提醒數值",
         f"- **回測規模**：全市場 **`{dual_bt['sampleSize']:,}` 檔**（近3月曾觸發朱家泓架構 `{dual_bt['triggeredStocks']:,}` 檔｜真實 60分K 驗證 `{dual_bt['real60mCount']:,}` 檔＋等比例 5/13/53MA 代理 `{dual_bt['proxyCount']:,}` 檔）｜區間：`{dual_bt['windowStart']}` ～ `{dual_bt['windowEnd']}`｜共測 **`{dual_bt['gridCombos']}` 組多空網格**｜單股 `{dual_bt['cooldownDays']}` 日反重疊冷卻｜已扣台股成本 `{dual_bt['costPct']}%`。",
-        f"- **🚀 看漲雙流共振最佳提醒數值**：乖離率 `0% ～ +{bb_b['biasMax']}%`、量比 `≥ {bb_b['vrMin']}x`、60分K 20MA 斜率 `≥ +{bb_b['slopeMin']}%`、停損 `{bb_b['slPct']}%`（近3月有效不重疊觸發 **`{bb_b['trades']}` 筆**｜勝率 **`{bb_b['winRate']}%`**｜單筆平均淨報酬 **`{bb_b['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_b['pf']}`**）。",
-        f"- **🔻 看跌雙流共振最佳提醒數值**：負乖離 `{bb_s['biasMax']}% ～ 0%`、破線量比 `≥ {bb_s['vrMin']}x`、60分K 20MA 斜率 `≤ {bb_s['slopeMin']}%`、反彈解除線 `{bb_s['slPct']}%`（近3月有效不重疊觸發 **`{bb_s['trades']}` 筆**｜勝率 **`{bb_s['winRate']}%`**｜單筆平均淨報酬 **`{bb_s['avgRet']:+.2f}%`**｜獲利因子 PF **`{bb_s['pf']}`**）。",
+        f"- **🚀 看漲雙流共振最佳提醒數值**：乖離率 `0% ～ +{bb_b['biasMax']}%`、量比 `≥ {bb_b['vrMin']}x`、60分K 20MA 斜率 `≥ +{bb_b['slopeMin']}%`、停損 `{bb_b['slPct']}%`（近3月有效不重疊觸發 **`{bb_b['trades']}` 筆**｜勝率 **{bb_b['winRate']}%**｜單筆平均淨報酬 **{bb_b['avgRet']:+.2f}%**｜獲利因子 PF **{bb_b['pf']}**）。",
+        f"- **🔻 看跌雙流共振最佳提醒數值**：負乖離 `{bb_s['biasMax']}% ～ 0%`、破線量比 `≥ {bb_s['vrMin']}x`、60分K 20MA 斜率 `≤ {bb_s['slopeMin']}%`、反彈解除線 `{bb_s['slPct']}%`（近3月有效不重疊觸發 **`{bb_s['trades']}` 筆**｜勝率 **{bb_s['winRate']}%**｜單筆平均淨報酬 **{bb_s['avgRet']:+.2f}%**｜獲利因子 PF **{bb_s['pf']}**）。",
         f"- **🛡️ 實戰位階自動判定**：目前大盤 V21 `{mkt_tot}` 分 → 建議啟用 **`{dual_bt['regimePresets'][dual_bt['recommendedRegime']]['name']}`**（多頭期望值檢核：`{dual_bt['bullStatus']}`；若處逆風自動套用 RS ≥ 85 ＋ 法人買超 ＋ 乖離 ≤ +4.5% 嚴選保護）。",
         f"- **📐 多空獨立結算窗口**：多頭 10 日波段（`{dual_bt['bullWindow']['start']}` ～ `{dual_bt['bullWindow']['end']}`）｜空頭 5 日急跌（`{dual_bt['bearWindow']['start']}` ～ `{dual_bt['bearWindow']['end']}`）。",
         f"- **🌤️ 大盤月線（20MA）順風 vs. 逆風看漲對照**：大盤站上 20MA 時做多 **`{dual_bt['bullByMarketRegime']['above20ma']['trades']}` 筆**（勝率 `{dual_bt['bullByMarketRegime']['above20ma']['winRate']}%`｜均報 `{dual_bt['bullByMarketRegime']['above20ma']['avgRet']:+.2f}%`｜PF **`{dual_bt['bullByMarketRegime']['above20ma']['pf']}`**） vs. 大盤跌破 20MA 時做多 **`{dual_bt['bullByMarketRegime']['below20ma']['trades']}` 筆**（勝率 `{dual_bt['bullByMarketRegime']['below20ma']['winRate']}%`｜均報 `{dual_bt['bullByMarketRegime']['below20ma']['avgRet']:+.2f}%`｜PF **`{dual_bt['bullByMarketRegime']['below20ma']['pf']}`**）。",
@@ -2037,7 +2432,7 @@ def main():
             f"\n## 17｜大盤 2 年位階回測 × 2,000 檔共振風險警示（{taiex_bt['windowStart']} ～ {taiex_bt['windowEnd']}）",
             f"- **目前大盤位階判定**：**`{_cur['regimeName']}`**（風險等級 **`{_cur['riskLevel']}/5` — {_cur['riskLabel']}**｜建議總倉位上限 **`{_cur['posCap']}`**）。",
             f"- **關鍵均線與 2,000 檔廣度**：收盤 `{_cur['c']:,.1f}`｜20MA `{_cur['m20']:,.0f}`（`{_cur['b20']:+.2f}%`）｜60MA `{_cur['m60']:,.0f}`（`{_cur['b60']:+.2f}%`）｜240MA 年線 `{_cur['m240']:,.0f}`（`{_cur['b240']:+.2f}%`）｜2,000 檔站上月線 **`{_cur['abv20Pct']}%`**。",
-            f"- **2 年動態控倉回測驗證（{taiex_bt['tradingDays']} 交易日）**：V21.8.1 六階控倉總報酬 **`{_sv['v21Regime']['totalRet']:+.2f}%`** / 最大回撤 MDD **`{_sv['v21Regime']['mdd']}%`** / Calmar **`{_sv['v21Regime']['calmar']}`** vs. 大盤滿倉死抱總報酬 `{_sv['buyHold']['totalRet']:+.2f}%` / MDD `{_sv['buyHold']['mdd']}%`（少扛 **`{_sv['drawdownSavedPct']}%`** 跌幅，年化波動降低 **`{_sv['volReducedPct']}%`**）。",
+            f"- **2 年動態控倉回測驗證（{taiex_bt['tradingDays']} 交易日）**：V21.8.2 六階控倉總報酬 **`{_sv['v21Regime']['totalRet']:+.2f}%`** / 最大回撤 MDD **`{_sv['v21Regime']['mdd']}%`** / Calmar **`{_sv['v21Regime']['calmar']}`** vs. 大盤滿倉死抱總報酬 `{_sv['buyHold']['totalRet']:+.2f}%` / MDD `{_sv['buyHold']['mdd']}%`（少扛 **`{_sv['drawdownSavedPct']}%`** 跌幅，年化波動降低 **`{_sv['volReducedPct']}%`**）。",
             "\n### 2 年六大位階歷史統計（未來 5日 / 10日 / 20日大盤實測）\n",
             "| 位階燈號 | 建議倉位 | 出現天數(占比) | 未來5日勝率/均報 | 未來10日勝率/均報 | 未來20日勝率/均報 | 20日均回撤/最壞 |",
             "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
@@ -2062,7 +2457,7 @@ def main():
         w.writeheader()
         w.writerows(sorted_stocks)
 
-    log(f"🎉 V21.3 雲端全自動更新完成！（耗時 {time.time() - t0:.1f} 秒｜{len(stocks)} 檔｜基準日 {trade_dt}｜大盤 V21 {mkt_tot}）")
+    log(f"🎉 V21.8.2 雲端全自動更新完成！（耗時 {time.time() - t0:.1f} 秒｜{len(stocks)} 檔｜基準日 {trade_dt}｜大盤 V21 {mkt_tot}）")
 
 
 if __name__ == "__main__":
