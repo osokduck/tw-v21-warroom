@@ -1,4 +1,4 @@
-name: 台股 V21.8 每日盤後全自動更新
+name: 台股 V21.8.2 每日全自動更新（含 06:00 美股晨間連動）
 
 on:
   push:
@@ -7,9 +7,11 @@ on:
       - 'data/**'
       - 'README.md'
   schedule:
-    # 週一至週五 台灣時間 15:45 盤後主更新（UTC 07:45）
+    # 週二至週六 台灣時間 06:00 美股盤後晨間戰情更新（UTC 週一至週五 22:00，美股夏令 04:00 / 冬令 05:00 收盤後立即同步並納入分析）
+    - cron: '0 22 * * 1-5'
+    # 週一至週五 台灣時間 15:45 台股盤後主更新（UTC 07:45）
     - cron: '45 7 * * 1-5'
-    # 週一至週五 台灣時間 18:10 補跑校準（UTC 10:10，確保 TAIFEX 期貨與上櫃法人完整入庫）
+    # 週一至週五 台灣時間 18:10 盤後複核校準（UTC 10:10，確保 TAIFEX 期貨、融資與上櫃法人完整入庫）
     - cron: '10 10 * * 1-5'
   workflow_dispatch:
 
@@ -48,10 +50,10 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 4. 執行 V21.8 全市場盤後分析與 2 年位階回測
+      - name: 4. 執行 V21.8.2 戰情分析（美股連動＋全市場評分＋2年位階回測）
         run: python3 -B scripts/v21_ci.py
 
-      - name: 5. 自動提交最新盤後資料（防衝突自動重試）
+      - name: 5. 自動提交最新戰情資料（防衝突自動重試）
         run: |
           git config user.name "V21 Auto Bot"
           git config user.email "v21-bot@users.noreply.github.com"
@@ -70,12 +72,18 @@ jobs:
             git add -A scripts/ data/
             git add -u
             if git diff --staged --quiet; then
-              echo "今日資料無變動，略過提交。"
+              echo "目前資料無變動，略過提交。"
               PUSH_OK=1
               break
             fi
             TW_DATE=$(TZ='Asia/Taipei' date '+%Y-%m-%d %H:%M')
-            git commit -m "📊 自動更新台股 V21.8 盤後戰情 (${TW_DATE} CST)"
+            TW_HOUR=$(TZ='Asia/Taipei' date '+%-H')
+            if [ "$TW_HOUR" -lt 12 ]; then
+              COMMIT_MSG="🌅 自動更新美股盤後與台股晨間連動 V21.8.2 (${TW_DATE} CST)"
+            else
+              COMMIT_MSG="📊 自動更新台股 V21.8.2 盤後戰情 (${TW_DATE} CST)"
+            fi
+            git commit -m "$COMMIT_MSG"
             if git push origin main; then
               echo "✅ 成功寫入 main 分支！"
               PUSH_OK=1
@@ -93,7 +101,7 @@ jobs:
       - name: 6. 設定 GitHub Pages
         uses: actions/configure-pages@v5
 
-      - name: 7. 打包網站與最新盤後資料
+      - name: 7. 打包網站與最新戰情資料
         uses: actions/upload-pages-artifact@v3
         with:
           path: '.'
