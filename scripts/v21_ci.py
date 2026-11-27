@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-V21.8.3 GitHub Actions 雲端全自動盤後更新引擎（純 Python 內建、零外部套件依賴）
+V21.8.4 GitHub Actions 雲端全自動盤後更新引擎（純 Python 內建、零外部套件依賴）
 ================================================================================
-V21.8.3 升級項目：
+V21.8.4 升級項目：
 1. 【大盤＋個股真實 K 線整合包】data/kline_bundle.json 新增 TAIEX（加權指數）與 OTC（櫃買指數）
    近 260 日真實日 K，並收錄 TOP10、RS 前 10 與核心權值股之真實日 K（160根）與 60分K（180根）。
 2. 【全市場個股五構面得分拆解】每檔個股額外輸出 p5=[宏觀,籌碼,技術,主升基本,風控]、
@@ -373,7 +373,7 @@ def fetch_taifex_foreign_tx():
 
 def analyze_us_market_impact(gsum, trade_dt):
     """
-    V21.8.3 美股最新收盤連動分析引擎（每日 06:00 CST 美股收盤後自動納入評分與開盤預判）
+    V21.8.4 美股最新收盤連動分析引擎（每日 06:00 CST 美股收盤後自動納入評分與開盤預判）
     ================================================================================
     - 依據 TSM ADR (35%)、費城半導體 SOX (30%)、輝達 NVDA (20%)、那斯達克 NASDAQ (15%)
       計算「美股科技對台股傳導脈衝 (impulsePct)」，並結合美債10Y (^TNX) 與台幣匯率 (TWD=X)
@@ -632,9 +632,9 @@ def check_macro_stale(macro_cfg):
 
 def try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
     """
-    V21.8.3 早上 06:00 美股極速重算模式（5 分鐘 → ~20 秒）：
+    V21.8.4 早上 06:00 美股極速重算模式（5 分鐘 → ~20 秒）：
     若為 06:00 晨間／開盤前時段，且既有 data/v21_latest.json 已是最新官方台股收盤日 (trade_dt)
-    且已具備 V21.8.3 完整欄位（含大盤 60分K MA240），則不重抓 2,140 檔台股，
+    且已具備 V21.8.4 完整欄位（含大盤 60分K MA240），則不重抓 2,140 檔台股，
     直接用最新美股收盤價重算指標 03/04、全市場 V21 評分、首頁風險卡與每日報告。
     """
     if os.environ.get("FORCE_FULL") == "1" or NOW_TW.hour >= 14:
@@ -650,12 +650,12 @@ def try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
         old_stocks = old_data.get("stocks") or []
         if old_meta.get("date") != trade_dt or len(old_stocks) < 1500:
             return False
-        if old_meta.get("version") != "V21.8.3" or not old_meta.get("taiex", {}).get("k60m"):
+        if old_meta.get("version") != "V21.8.4" or not old_meta.get("taiex", {}).get("k60m") or not (old_meta.get("marketRegime") or {}).get("reboundWatch", {}).get("last4CloseSum"):
             return False
     except Exception:
         return False
 
-    log(f"⚡ [極速晨間模式] 台股基準日 {trade_dt} 已是最新 V21.8.3 完整結構，僅重算最新美股收盤與連動分析！")
+    log(f"⚡ [極速晨間模式] 台股基準日 {trade_dt} 已是最新 V21.8.4 完整結構，僅重算最新美股收盤與連動分析！")
     us_impact = analyze_us_market_impact(gsum, trade_dt)
     log(f"  🇺🇸 最新美股連動（{us_impact['usDate']}）：{us_impact['headline']}（宏觀調整 {us_impact['scoreDelta']:+.1f} 分）")
 
@@ -701,6 +701,8 @@ def try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
     rg = json.load(open(rg_path, "r", encoding="utf-8"))
     if isinstance(rg.get("current"), dict):
         rg["current"]["mktV21"] = mkt_tot
+    if isinstance(rg.get("reboundWatch"), dict):
+        rg["reboundWatch"]["syncedAt"] = NOW_TW.strftime("%Y-%m-%d %H:%M")
     alerts = [a for a in (rg.get("riskAlerts") or []) if "美股" not in str(a.get("tag", ""))]
     us_tag = "美股晨間預判" if us_impact.get("sessionMode") == "PRE_OPEN" else "美股連動分析"
     alerts.append({
@@ -756,7 +758,7 @@ def try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
         json.dump(rg, f, ensure_ascii=False, indent=2)
     with open(latest_path, "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": old_meta, "stocks": old_stocks, "sourceInfo": f"V21.8.3 晨間美股極速更新 {ts_now}（台股 {trade_dt}｜美股 {us_impact['usDate']}）"},
+            {"meta": old_meta, "stocks": old_stocks, "sourceInfo": f"V21.8.4 晨間美股極速更新 {ts_now}（台股 {trade_dt}｜美股 {us_impact['usDate']}）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
 
@@ -801,7 +803,7 @@ def try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
     except Exception as e:
         log(f"  ⚠️ 晨間極速更新 MD 異常：{e}")
 
-    log(f"🎉 V21.8.3 晨間美股極速重算完成！（耗時 {time.time() - t0:.1f} 秒｜美股日 {us_impact['usDate']}｜大盤 V21 {mkt_tot}）")
+    log(f"🎉 V21.8.4 晨間美股極速重算完成！（耗時 {time.time() - t0:.1f} 秒｜美股日 {us_impact['usDate']}｜大盤 V21 {mkt_tot}）")
     return True
 
 
@@ -1584,7 +1586,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
 
     return {
         "calibrated": True,
-        "version": "V21.8.3",
+        "version": "V21.8.4",
         "tradeDate": trade_dt,
         "windowStart": bear_start_seen if bear_start_seen != "9999-99-99" else trade_dt,
         "windowEnd": bear_end_seen if bear_end_seen != "0000-00-00" else trade_dt,
@@ -1652,7 +1654,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
     ORDER = ("BULL_ATTACK", "STRONG_SURGE", "OVERHEAT", "CONSOLIDATION", "BEAR_DEFENSE", "CRASH_ALERT")
 
     if not tx_rw or len(tx_rw) < 120:
-        return {"calibrated": False, "version": "V21.8.3", "note": "大盤歷史資料不足 120 日"}
+        return {"calibrated": False, "version": "V21.8.4", "note": "大盤歷史資料不足 120 日"}
 
     dts = [r[0][:10] for r in tx_rw]
     cl = [float(r[4]) for r in tx_rw]
@@ -1958,19 +1960,32 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
             "detail": "盤中上下劇烈洗盤風險高，新進部位請縮減單筆部位至原本一半，絕不使用融資擴張槓桿。"
         })
 
-    # 5. 右側轉折確認監控（於空頭 / 破線危機期間自動啟動，避免左側亂接刀，同時不錯過高勝率反轉）
+    # 5. 右側轉折抄底三燈號監控（附前 4 日收盤和與前日 5MA，供前端盤中即時同步精準重算）
     c_ma240_ok = cur["c"] >= cur["m240"]
     c_br15_ok = (abv20 is not None and abv20 >= 15.0)
     c_ma5_ok = (cur["c"] >= cur["m5"] and cur["m5sl"] > 0)
     rebound_score = int(c_ma240_ok) + int(c_br15_ok) + int(c_ma5_ok)
+    prev4_closes = [round(float(x), 2) for x in cl[-5:-1]] if len(cl) >= 5 else [round(float(x), 2) for x in cl[:-1]]
+    prev4_sum = round(sum(prev4_closes), 2)
+    last4_closes = [round(float(x), 2) for x in cl[-4:]] if len(cl) >= 4 else [round(float(x), 2) for x in cl]
+    last4_sum = round(sum(last4_closes), 2)
+    prev_m5_val = round(float(ma5[-2]), 2) if (len(ma5) >= 2 and ma5[-2]) else cur["m5"]
     rebound_watch = {
         "active": cur["rg"] in ("CRASH_ALERT", "BEAR_DEFENSE"),
+        "tradeDate": cur["dt"],
+        "syncedAt": NOW_TW.strftime("%Y-%m-%d %H:%M"),
         "passedCount": rebound_score,
         "totalChecks": 3,
+        "ma240Val": cur["m240"],
+        "ma5Val": cur["m5"],
+        "prevM5": prev_m5_val,
+        "prev4CloseSum": prev4_sum,
+        "last4CloseSum": last4_sum,
+        "abv20Pct": abv20,
         "checks": [
-            {"label": f"重站回 240MA 年線（{cur['m240']:,.0f} 點）", "ok": c_ma240_ok, "now": f"{cur['c']:,.1f}（{cur['b240']:+.2f}%）"},
-            {"label": "2,000 檔站月線脫離冰點（≥ 15%）", "ok": c_br15_ok, "now": f"{abv20}%" if abv20 is not None else "N/A"},
-            {"label": f"短線站上 5MA（{cur['m5']:,.0f}）且 5MA 翻揚", "ok": c_ma5_ok, "now": f"5MA斜率 {cur['m5sl']:+.2f}%"},
+            {"id": "ma240", "label": f"重站回 240MA 年線（{cur['m240']:,.0f} 點）", "ok": c_ma240_ok, "now": f"{cur['c']:,.1f}（{cur['b240']:+.2f}%）"},
+            {"id": "breadth15", "label": "2,000 檔站月線脫離冰點（≥ 15%）", "ok": c_br15_ok, "now": f"{abv20}%" if abv20 is not None else "N/A"},
+            {"id": "ma5", "label": f"短線站上 5MA（{cur['m5']:,.0f}）且 5MA 翻揚", "ok": c_ma5_ok, "now": f"5MA斜率 {cur['m5sl']:+.2f}%"},
         ],
     }
     if rebound_watch["active"]:
@@ -2009,7 +2024,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
 
     return {
         "calibrated": True,
-        "version": "V21.8.3",
+        "version": "V21.8.4",
         "tradeDate": trade_dt,
         "windowStart": daily_states[0]["dt"],
         "windowEnd": daily_states[-1]["dt"],
@@ -2070,7 +2085,7 @@ def main():
     t0 = time.time()
     MACRO = load_macro()
     log("==================================================")
-    log("🚀 V21.8.3 GitHub Actions 雲端全自動盤後更新引擎啟動！")
+    log("🚀 V21.8.4 GitHub Actions 雲端全自動盤後更新引擎啟動！")
     log(f"🕒 台灣時間：{NOW_TW.strftime('%Y-%m-%d %H:%M:%S')}")
     log("==================================================")
 
@@ -2103,7 +2118,7 @@ def main():
     trade_dt = patch_official_indices(gsum, gfr)
     log(f"  📅 官方基準交易日：{trade_dt}")
 
-    # 早上 06:00 美股極速重算模式（若既有資料已為最新台股收盤日且為 V21.8.3，約 20 秒完成）
+    # 早上 06:00 美股極速重算模式（若既有資料已為最新台股收盤日且為 V21.8.4，約 20 秒完成）
     if try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
         return
 
@@ -2583,7 +2598,7 @@ def main():
     hist_dates = sorted([d for d in ph if re.match(r"^\d{4}-\d{2}-\d{2}$", d)])[-60:]
     history_series = [{"dt": d, "ms": ph[d].get("ms", 50.0), "taiex": ph[d].get("taiex", 0.0), "above20ma": ph[d].get("above20ma", 0.0)} for d in hist_dates]
 
-    log("📝 [6/6] 正在輸出 V21.8.3 JSON、大盤+個股真實 K 線包與 17 節戰情報告...")
+    log("📝 [6/6] 正在輸出 V21.8.4 JSON、大盤+個股真實 K 線包與 17 節戰情報告...")
     st_m, act_m = lbl(mkt_tot)
     ts_now = NOW_TW.strftime("%Y-%m-%d %H:%M")
     pos_v21 = "70%～85%" if mkt_tot >= 80 else ("50%～65%" if mkt_tot >= 65 else "30%～45%")
@@ -2641,7 +2656,7 @@ def main():
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
-        "version": "V21.8.3",
+        "version": "V21.8.4",
         "sessionLabel": us_impact["sessionLabel"],
         "usAnalysis": us_impact,
         "dualAlert": dual_bt,
@@ -2698,7 +2713,7 @@ def main():
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.8.3 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.8.4 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
     with open(os.path.join(DATA_DIR, "dual_alert_backtest.json"), "w", encoding="utf-8") as f:
@@ -2706,7 +2721,7 @@ def main():
     with open(os.path.join(DATA_DIR, "taiex_regime_backtest.json"), "w", encoding="utf-8") as f:
         json.dump(taiex_bt, f, ensure_ascii=False, indent=2)
 
-    # 2. V21.8.3 kline_bundle.json: Include TAIEX & OTC real daily bars + Top20/Core daily & 60m real bars!
+    # 2. V21.8.4 kline_bundle.json: Include TAIEX & OTC real daily bars + Top20/Core daily & 60m real bars!
     bundle_codes = set([r["code"] for r in top10] + [r["code"] for r in rs20[:10]] + ["2330", "2317", "2454", "2308", "2303", "2382", "3711", "2412", "2597", "2610", "2618", "1303", "2881", "2882", "6614", "3023"])
     kline_bundle = {"tradeDate": trade_dt, "indices": {}, "indices60m": {}, "daily": {}, "k60m": {}}
     for ik in ("TAIEX", "OTC"):
@@ -2731,7 +2746,7 @@ def main():
     inf = sorted(ist, key=lambda x: (x["achg"], x["il"]), reverse=True)[:6]
     outf = sorted(ist, key=lambda x: (x["achg"], x["il"]))[:6]
     md = [
-        f"# 台股二十大指標最終版（V21.8.3 雲端全自動版）每日量化戰情報告（{trade_dt}）",
+        f"# 台股二十大指標最終版（V21.8.4 雲端全自動版）每日量化戰情報告（{trade_dt}）",
         f"**行情基準日**：`{trade_dt}`（同步率 `{sync_rate}%`）｜**美股最新基準日**：`{us_impact['usDate']}`（{us_impact['sessionLabel']}）｜**產出時間**：{ts_now}｜**有效樣本**：`{len(stocks)}` 檔｜**大盤 V21 總分**：**`{mkt_tot}/100`（{st_m}／{act_m}）**\n",
         "---", "## 1｜全球經濟與美股"
     ]
@@ -2818,7 +2833,7 @@ def main():
             f"- **目前大盤位階判定**：**`{_cur['regimeName']}`**（風險等級 **`{_cur['riskLevel']}/5` — {_cur['riskLabel']}**｜建議總倉位上限 **`{_cur['posCap']}`**）。",
             f"- **關鍵均線與 2,000 檔廣度**：收盤 `{_cur['c']:,.1f}`｜20MA `{_cur['m20']:,.0f}`（`{_cur['b20']:+.2f}%`）｜60MA `{_cur['m60']:,.0f}`（`{_cur['b60']:+.2f}%`）｜240MA 年線 `{_cur['m240']:,.0f}`（`{_cur['b240']:+.2f}%`）｜2,000 檔站上月線 **`{_cur['abv20Pct']}%`**。",
             f"- **大盤 60分K MA240 分水嶺**：加權 60分K 240MA " + (f"`{tx_60m['m240']:,.1f}`（`{tx_60m['b240']:+.2f}%`，{tx_60m['status']}）" if tx_60m else "待更新") + "｜櫃買 60分K 240MA " + (f"`{otc_60m['m240']:,.2f}`（`{otc_60m['b240']:+.2f}%`，{otc_60m['status']}）" if otc_60m else "待更新") + "。",
-            f"- **2 年動態控倉回測驗證（{taiex_bt['tradingDays']} 交易日）**：V21.8.3 六階控倉總報酬 **`{_sv['v21Regime']['totalRet']:+.2f}%`** / 最大回撤 MDD **`{_sv['v21Regime']['mdd']}%`** / Calmar **`{_sv['v21Regime']['calmar']}`** vs. 大盤滿倉死抱總報酬 `{_sv['buyHold']['totalRet']:+.2f}%` / MDD `{_sv['buyHold']['mdd']}%`（少扛 **`{_sv['drawdownSavedPct']}%`** 跌幅，年化波動降低 **`{_sv['volReducedPct']}%`**）。",
+            f"- **2 年動態控倉回測驗證（{taiex_bt['tradingDays']} 交易日）**：V21.8.4 六階控倉總報酬 **`{_sv['v21Regime']['totalRet']:+.2f}%`** / 最大回撤 MDD **`{_sv['v21Regime']['mdd']}%`** / Calmar **`{_sv['v21Regime']['calmar']}`** vs. 大盤滿倉死抱總報酬 `{_sv['buyHold']['totalRet']:+.2f}%` / MDD `{_sv['buyHold']['mdd']}%`（少扛 **`{_sv['drawdownSavedPct']}%`** 跌幅，年化波動降低 **`{_sv['volReducedPct']}%`**）。",
             "\n### 2 年六大位階歷史統計（未來 5日 / 10日 / 20日大盤實測）\n",
             "| 位階燈號 | 建議倉位 | 出現天數(占比) | 未來5日勝率/均報 | 未來10日勝率/均報 | 未來20日勝率/均報 | 20日均回撤/最壞 |",
             "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
@@ -2829,6 +2844,16 @@ def main():
                 f"{rs['win5']}% / {rs['ret5']:+.2f}% | {rs['win10']}% / {rs['ret10']:+.2f}% | "
                 f"**{rs['win20']}%** / **{rs['ret20']:+.2f}%** | {rs['avgDd20']:.2f}% / {rs['worstDd20']:.2f}% |"
             )
+        _rw = taiex_bt.get("reboundWatch") or {}
+        if _rw.get("checks"):
+            _st_txt = "✅ 已達標 ≥2 燈・可分批右側回補" if _rw.get("passedCount", 0) >= 2 else "🛡️ 未達標・嚴守現金紀律"
+            md += [
+                f"\n### 🚦 右側轉折抄底三燈號同步狀態（{_rw.get('passedCount', 0)}/{_rw.get('totalChecks', 3)}｜{_st_txt}｜同步時間 `{_rw.get('syncedAt', ts_now)}`）\n",
+                "| 燈號 | 右側確認條件 | 狀態 | 目前即時數值 |",
+                "| :---: | :--- | :---: | :--- |",
+            ]
+            for _i, _ck in enumerate(_rw["checks"], 1):
+                md.append(f"| 燈號 {_i} | {_ck['label']} | {'✅ 亮綠燈' if _ck['ok'] else '⬜ 未達標'} | {_ck['now']} |")
         md.append("\n### 今日系統位階風險提醒")
         for al in taiex_bt.get("riskAlerts", []):
             ic = "🚨" if al["level"] == "danger" else ("⚠️" if al["level"] == "warn" else "✅")
@@ -2843,7 +2868,7 @@ def main():
         w.writeheader()
         w.writerows(sorted_stocks)
 
-    log(f"🎉 V21.8.3 雲端全自動更新完成！（耗時 {time.time() - t0:.1f} 秒｜{len(stocks)} 檔｜基準日 {trade_dt}｜大盤 V21 {mkt_tot}）")
+    log(f"🎉 V21.8.4 雲端全自動更新完成！（耗時 {time.time() - t0:.1f} 秒｜{len(stocks)} 檔｜基準日 {trade_dt}｜大盤 V21 {mkt_tot}）")
 
 
 if __name__ == "__main__":
