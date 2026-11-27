@@ -1,4 +1,4 @@
-const CACHE_NAME = "v21-warroom-shell-v11";
+const CACHE_NAME = "v21-warroom-shell-v12";
 const SHELL_ASSETS = ["./", "./index.html", "./manifest.json", "./apple-touch-icon.png"];
 
 self.addEventListener("install", (event) => {
