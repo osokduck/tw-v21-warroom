@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-V21.8.5 GitHub Actions 雲端全自動盤後更新引擎（純 Python 內建、零外部套件依賴）
+V21.8.6 GitHub Actions 雲端全自動盤後更新引擎（純 Python 內建、零外部套件依賴）
 ================================================================================
-V21.8.5 升級項目：
+V21.8.6 升級項目：
 1. 【大盤＋個股真實 K 線整合包】data/kline_bundle.json 新增 TAIEX（加權指數）與 OTC（櫃買指數）
    近 260 日真實日 K，並收錄 TOP10、RS 前 10 與核心權值股之真實日 K（160根）與 60分K（180根）。
 2. 【全市場個股五構面得分拆解】每檔個股額外輸出 p5=[宏觀,籌碼,技術,主升基本,風控]、
@@ -373,7 +373,7 @@ def fetch_taifex_foreign_tx():
 
 def analyze_us_market_impact(gsum, trade_dt):
     """
-    V21.8.5 美股最新收盤連動分析引擎（每日 06:00 CST 美股收盤後自動納入評分與開盤預判）
+    V21.8.6 美股最新收盤連動分析引擎（每日 06:00 CST 美股收盤後自動納入評分與開盤預判）
     ================================================================================
     - 依據 TSM ADR (35%)、費城半導體 SOX (30%)、輝達 NVDA (20%)、那斯達克 NASDAQ (15%)
       計算「美股科技對台股傳導脈衝 (impulsePct)」，並結合美債10Y (^TNX) 與台幣匯率 (TWD=X)
@@ -660,9 +660,9 @@ def check_macro_stale(macro_cfg):
 
 def try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
     """
-    V21.8.5 早上 06:00 美股極速重算模式（5 分鐘 → ~20 秒）：
+    V21.8.6 早上 06:00 美股極速重算模式（5 分鐘 → ~20 秒）：
     若為 06:00 晨間／開盤前時段，且既有 data/v21_latest.json 已是最新官方台股收盤日 (trade_dt)
-    且已具備 V21.8.5 完整欄位（含大盤 60分K MA240），則不重抓 2,140 檔台股，
+    且已具備 V21.8.6 完整欄位（含大盤 60分K MA240），則不重抓 2,140 檔台股，
     直接用最新美股收盤價重算指標 03/04、全市場 V21 評分、首頁風險卡與每日報告。
     """
     if os.environ.get("FORCE_FULL") == "1" or NOW_TW.hour >= 14:
@@ -678,12 +678,12 @@ def try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
         old_stocks = old_data.get("stocks") or []
         if old_meta.get("date") != trade_dt or len(old_stocks) < 1500:
             return False
-        if old_meta.get("version") != "V21.8.5" or not old_meta.get("taiex", {}).get("k60m") or old_meta.get("breadth", {}).get("above20Count") is None:
+        if old_meta.get("version") != "V21.8.6" or not old_meta.get("taiex", {}).get("k60m") or old_meta.get("breadth", {}).get("above20Count") is None or not old_meta.get("sectorAnalysis"):
             return False
     except Exception:
         return False
 
-    log(f"⚡ [極速晨間模式] 台股基準日 {trade_dt} 已是最新 V21.8.5 完整結構，僅重算最新美股收盤與連動分析！")
+    log(f"⚡ [極速晨間模式] 台股基準日 {trade_dt} 已是最新 V21.8.6 完整結構，僅重算最新美股收盤與連動分析！")
     us_impact = analyze_us_market_impact(gsum, trade_dt)
     log(f"  🇺🇸 最新美股連動（{us_impact['usDate']}）：{us_impact['headline']}（宏觀調整 {us_impact['scoreDelta']:+.1f} 分）")
 
@@ -788,7 +788,7 @@ def try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
         json.dump(rg, f, ensure_ascii=False, indent=2)
     with open(latest_path, "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": old_meta, "stocks": old_stocks, "sourceInfo": f"V21.8.5 晨間美股極速更新 {ts_now}（台股 {trade_dt}｜美股 {us_impact['usDate']}）"},
+            {"meta": old_meta, "stocks": old_stocks, "sourceInfo": f"V21.8.6 晨間美股極速更新 {ts_now}（台股 {trade_dt}｜美股 {us_impact['usDate']}）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
 
@@ -833,7 +833,7 @@ def try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
     except Exception as e:
         log(f"  ⚠️ 晨間極速更新 MD 異常：{e}")
 
-    log(f"🎉 V21.8.5 晨間美股極速重算完成！（耗時 {time.time() - t0:.1f} 秒｜美股日 {us_impact['usDate']}｜大盤 V21 {mkt_tot}）")
+    log(f"🎉 V21.8.6 晨間美股極速重算完成！（耗時 {time.time() - t0:.1f} 秒｜美股日 {us_impact['usDate']}｜大盤 V21 {mkt_tot}）")
     return True
 
 
@@ -1616,7 +1616,7 @@ def run_dual_backtest_2000(stocks, daily_cache_mem, k60_state_mem, trade_dt, tx_
 
     return {
         "calibrated": True,
-        "version": "V21.8.5",
+        "version": "V21.8.6",
         "tradeDate": trade_dt,
         "windowStart": bear_start_seen if bear_start_seen != "9999-99-99" else trade_dt,
         "windowEnd": bear_end_seen if bear_end_seen != "0000-00-00" else trade_dt,
@@ -1684,7 +1684,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
     ORDER = ("BULL_ATTACK", "STRONG_SURGE", "OVERHEAT", "CONSOLIDATION", "BEAR_DEFENSE", "CRASH_ALERT")
 
     if not tx_rw or len(tx_rw) < 120:
-        return {"calibrated": False, "version": "V21.8.5", "note": "大盤歷史資料不足 120 日"}
+        return {"calibrated": False, "version": "V21.8.6", "note": "大盤歷史資料不足 120 日"}
 
     dts = [r[0][:10] for r in tx_rw]
     cl = [float(r[4]) for r in tx_rw]
@@ -2054,7 +2054,7 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
 
     return {
         "calibrated": True,
-        "version": "V21.8.5",
+        "version": "V21.8.6",
         "tradeDate": trade_dt,
         "windowStart": daily_states[0]["dt"],
         "windowEnd": daily_states[-1]["dt"],
@@ -2086,6 +2086,286 @@ def run_taiex_2y_regime_backtest(tx_rw, otc_rw, breadth_hist, dual_bt, mkt_tot, 
         "equityCurve": curve_pts,
         "recent20": recent_20,
     }
+def build_sector_flow_analysis(stocks, daily_cache_mem, ph, trade_dt, ts_now):
+    """
+    V21.8.6 台股版塊資金流出流入深度分析 × 連續流向提醒 × 主要版塊 10 檔核心個股引擎
+    ================================================================================
+    - 真實金額口徑（億元）：同時計算各產業「成交額(億) / 佔比%」、「量價淨資金流(億, 紅盤成交額−黑盤成交額)」、
+      「三大法人估計買賣超金額(億)（外資/投信拆解）」。
+    - 雙源連續天數（Day 1 即刻生效）：
+      1. 由 daily_cache_mem 近 10 個交易日全市場真實日K回溯計算各版塊每日量價淨資金流，得出「連續流入/流出天數 (priceStreak)」與近5日紅綠燈。
+      2. 寫入並累積 v21_hist.json['_sector_hist'] 近 30 日官方法人買賣超金額，計算「法人連買/連賣天數 (instiStreak)」。
+    - 每個主要流入/流出版塊精選 10 檔最具代表性之核心個股（含成交額億、法人張數/億、外資/投信、RS、V21、3%停損與定位）。
+    ================================================================================
+    """
+    eq_stocks = [s for s in stocks if s.get("tp") == "股票" and s.get("ind") and s.get("ind") != "ETF"]
+    by_ind = {}
+    for s in eq_stocks:
+        by_ind.setdefault(s["ind"], []).append(s)
+
+    total_turnover_yi = sum((s["price"] * s["lots"] * 1000.0) / 1e8 for s in eq_stocks) or 1.0
+    total_insti_yi = round(sum((s["il"] * s["price"] * 1000.0) / 1e8 for s in eq_stocks), 2)
+
+    # 1. 由全市場日K快取回溯近 12 個交易日各產業量價淨資金流（紅盤成交額 - 黑盤成交額，單位：億元）
+    hist_pv = {}  # {ind: {dt: pv_net_yi}}
+    all_recent_dts = set()
+    for ind, members in by_ind.items():
+        if len(members) < 3:
+            continue
+        d_acc = {}
+        for s in members:
+            bars = daily_cache_mem.get(s["code"]) or []
+            if len(bars) < 2:
+                continue
+            tail = bars[-13:]
+            for k in range(1, len(tail)):
+                b = tail[k]
+                pb = tail[k - 1]
+                dt_b = b["t"][:10]
+                if dt_b > trade_dt:
+                    continue
+                val_yi = (float(b["c"]) * float(b["v"]) * 1000.0) / 1e8
+                diff = float(b["c"]) - float(pb["c"])
+                sgn = 1.0 if diff > 0 else (-1.0 if diff < 0 else 0.0)
+                d_acc[dt_b] = d_acc.get(dt_b, 0.0) + sgn * val_yi
+                all_recent_dts.add(dt_b)
+        hist_pv[ind] = d_acc
+
+    recent_dts = sorted(d for d in all_recent_dts if d <= trade_dt)[-10:]
+    if trade_dt not in recent_dts:
+        recent_dts = (recent_dts + [trade_dt])[-10:]
+
+    # 讀取歷史官方法人版塊紀錄（用於累積法人連買/連賣天數）
+    sec_hist = ph.get("_sector_hist")
+    if not isinstance(sec_hist, dict):
+        sec_hist = {}
+    prev_sec_dts = sorted(d for d in sec_hist.keys() if re.match(r"^\d{4}-\d{2}-\d{2}$", d) and d < trade_dt)
+
+    def calc_streak(vals):
+        """從最後一天往回數連續同號天數（正＝連流入、負＝連流出）"""
+        if not vals:
+            return 0
+        last = vals[-1]
+        if abs(last) < 1e-6:
+            return 0
+        want_pos = last > 0
+        cnt = 0
+        for v in reversed(vals):
+            if want_pos and v > 0:
+                cnt += 1
+            elif (not want_pos) and v < 0:
+                cnt += 1
+            else:
+                break
+        return cnt if want_pos else -cnt
+
+    def pick_top10_stocks(members, is_inflow):
+        """為主要流入／流出版塊精選 10 檔主要個股（兼顧成交重心、法人主導力與領漲/領跌指標）"""
+        enriched = []
+        for s in members:
+            t_yi = round((s["price"] * s["lots"] * 1000.0) / 1e8, 2)
+            i_yi = round((s["il"] * s["price"] * 1000.0) / 1e8, 2)
+            f_yi = round((s["fl"] * s["price"] * 1000.0) / 1e8, 2)
+            tr_yi = round((s["tl"] * s["price"] * 1000.0) / 1e8, 2)
+            dir_sgn = 1.0 if is_inflow else -1.0
+            # 排序權重：成交額核心度 + 同方向法人資金推力 + 同方向漲跌幅 + V21/RS 代表性
+            rank_sc = (
+                math.log1p(max(t_yi, 0.0) * 10.0) * 4.5
+                + max(0.0, dir_sgn * i_yi) * 1.4
+                + (dir_sgn * s["chg"]) * 0.45
+                + (s["v21"] * 0.03 if is_inflow else (100.0 - s["v21"]) * 0.03)
+            )
+            if is_inflow:
+                if s["chg"] >= 5.0 and s["il"] > 0:
+                    role = "🔥 領漲法人主力"
+                elif s["chg"] >= 5.0:
+                    role = "🚀 強勢領漲指標"
+                elif s["il"] > 0 and i_yi >= 1.0:
+                    role = "🏦 法人吸籌核心"
+                elif t_yi >= 10.0:
+                    role = "💎 權值成交核心"
+                else:
+                    role = "📈 順勢活躍股"
+            else:
+                if s["chg"] <= -4.0 and s["il"] < 0:
+                    role = "🚨 領跌法人提款"
+                elif s["il"] < 0 and i_yi <= -1.0:
+                    role = "🏦 法人調節重心"
+                elif s["chg"] <= -4.0:
+                    role = "📉 弱勢領跌指標"
+                elif s["il"] > 0 and i_yi >= 0.5:
+                    role = "🛡️ 逆勢法人護盤"
+                elif t_yi >= 10.0:
+                    role = "💎 權值成交重心"
+                else:
+                    role = "⚠️ 走弱觀察股"
+            enriched.append((rank_sc, {
+                "c": s["code"], "n": s["name"], "m": s["mkt"],
+                "p": s["price"], "ch": s["chg"], "v": s["lots"],
+                "tYi": t_yi, "il": s["il"], "iYi": i_yi,
+                "fl": s["fl"], "tl": s["tl"], "fYi": f_yi, "trYi": tr_yi,
+                "rs": s["rs_rk"], "s": s["v21"], "sl": s["sl"],
+                "b": s["b60s"], "z": s["zhu"], "role": role,
+            }))
+        enriched.sort(key=lambda x: x[0], reverse=True)
+        return [x[1] for x in enriched[:10]]
+
+    all_sectors = []
+    today_sec_snapshot = {}
+
+    for ind, members in by_ind.items():
+        if len(members) < 3:
+            continue
+        cnt = len(members)
+        achg = round(sum(x["chg"] for x in members) / cnt, 2)
+        ars = round(sum(x["rs_rk"] for x in members) / cnt, 1)
+        av21 = round(sum(x["v21"] for x in members) / cnt, 1)
+        il_lots = round(sum(x["il"] for x in members), 1)
+        fl_lots = round(sum(x["fl"] for x in members), 1)
+        tl_lots = round(sum(x["tl"] for x in members), 1)
+
+        t_yi = round(sum((x["price"] * x["lots"] * 1000.0) / 1e8 for x in members), 2)
+        t_share = round(t_yi / total_turnover_yi * 100.0, 2)
+        insti_yi = round(sum((x["il"] * x["price"] * 1000.0) / 1e8 for x in members), 2)
+        foreign_yi = round(sum((x["fl"] * x["price"] * 1000.0) / 1e8 for x in members), 2)
+        trust_yi = round(sum((x["tl"] * x["price"] * 1000.0) / 1e8 for x in members), 2)
+
+        # 當日量價淨資金流（億元）
+        pv_today = round(sum((1.0 if x["chg"] > 0 else (-1.0 if x["chg"] < 0 else 0.0)) * (x["price"] * x["lots"] * 1000.0) / 1e8 for x in members), 2)
+        up_cnt = sum(1 for x in members if x["chg"] > 0)
+        dn_cnt = sum(1 for x in members if x["chg"] < 0)
+        abv20_p = round(sum(1 for x in members if x["price"] > x["ma20"]) / cnt * 100.0, 1)
+
+        # 補齊當日量價流並計算連續流入/流出天數
+        d_map = dict(hist_pv.get(ind) or {})
+        d_map[trade_dt] = pv_today
+        pv_series = [round(d_map.get(d, 0.0), 2) for d in recent_dts]
+        price_streak = calc_streak(pv_series)
+        prev_streak = calc_streak(pv_series[:-1]) if len(pv_series) >= 2 else 0
+        cum5d_yi = round(sum(pv_series[-5:]), 2)
+        streak5d = ["+" if v > 0 else ("-" if v < 0 else "0") for v in pv_series[-5:]]
+
+        # 法人連買/連賣天數（結合 v21_hist.json 滾動累積）
+        insti_series = [float((sec_hist.get(d) or {}).get(ind, {}).get("iYi", 0.0)) for d in prev_sec_dts[-9:]] + [insti_yi]
+        insti_streak = calc_streak(insti_series)
+
+        # 綜合資金流向定性標籤
+        if pv_today > 0 and insti_yi > 0:
+            flow_tag = "🔥 真金白銀雙流入"
+        elif pv_today > 0 and insti_yi <= -5.0:
+            flow_tag = "⚠️ 拉價法人出貨背離"
+        elif pv_today < 0 and insti_yi >= 3.0:
+            flow_tag = "💎 壓盤法人暗中吸籌"
+        elif pv_today < 0 and insti_yi < 0:
+            flow_tag = "🧊 價跌法人雙提款"
+        elif pv_today > 0:
+            flow_tag = "📈 內資價量流入"
+        else:
+            flow_tag = "📉 資金調節流出"
+
+        # 綜合流向強度分數（結合量價淨額億 + 法人金額億*1.6 + 平均漲跌）
+        flow_score = round(pv_today + insti_yi * 1.6 + achg * 2.5, 2)
+
+        today_sec_snapshot[ind] = {"pvYi": pv_today, "iYi": insti_yi, "achg": achg, "tYi": t_yi}
+        all_sectors.append({
+            "ind": ind, "cnt": cnt, "upCnt": up_cnt, "downCnt": dn_cnt,
+            "achg": achg, "ars": ars, "av21": av21, "abv20Pct": abv20_p,
+            "tYi": t_yi, "tShare": t_share,
+            "pvYi": pv_today, "iYi": insti_yi, "fYi": foreign_yi, "trYi": trust_yi,
+            "il": il_lots, "fl": fl_lots, "tl": tl_lots,
+            "priceStreak": price_streak, "prevStreak": prev_streak, "instiStreak": insti_streak,
+            "cum5dYi": cum5d_yi, "streak5d": streak5d,
+            "flowScore": flow_score, "flowTag": flow_tag,
+        })
+
+    # 寫回滾動 30 日版塊歷史
+    sec_hist[trade_dt] = today_sec_snapshot
+    keep_sec_dts = sorted(d for d in sec_hist.keys() if re.match(r"^\d{4}-\d{2}-\d{2}$", d))[-30:]
+    ph["_sector_hist"] = {d: sec_hist[d] for d in keep_sec_dts}
+
+    # 產出主要流入前 6 大版塊 & 主要流出前 6 大版塊，並各自掛載 10 檔主要個股
+    inflow_raw = sorted(all_sectors, key=lambda x: (x["flowScore"], x["pvYi"], x["achg"]), reverse=True)[:6]
+    outflow_raw = sorted(all_sectors, key=lambda x: (x["flowScore"], x["pvYi"], x["achg"]))[:6]
+
+    inflow_sectors = []
+    for sec in inflow_raw:
+        inflow_sectors.append({**sec, "top10": pick_top10_stocks(by_ind.get(sec["ind"], []), is_inflow=True)})
+
+    outflow_sectors = []
+    for sec in outflow_raw:
+        outflow_sectors.append({**sec, "top10": pick_top10_stocks(by_ind.get(sec["ind"], []), is_inflow=False)})
+
+    # 產出「連續流出流入提醒 (streakAlerts)」
+    streak_alerts = []
+    consec_in = sorted([x for x in all_sectors if x["priceStreak"] >= 3 or x["instiStreak"] >= 3], key=lambda x: (max(x["priceStreak"], x["instiStreak"]), x["cum5dYi"]), reverse=True)
+    consec_out = sorted([x for x in all_sectors if x["priceStreak"] <= -3 or x["instiStreak"] <= -3], key=lambda x: (min(x["priceStreak"], x["instiStreak"]), x["cum5dYi"]))
+
+    for x in consec_in[:4]:
+        st_lbl = f"連 {x['priceStreak']} 日量價淨流入" if x["priceStreak"] >= 3 else f"法人連 {x['instiStreak']} 日買超"
+        streak_alerts.append({
+            "type": "inflow_streak", "level": "ok", "ind": x["ind"],
+            "streak": max(x["priceStreak"], x["instiStreak"]),
+            "tag": f"🔥 連續流入・{st_lbl}",
+            "title": f"{x['ind']}（{st_lbl}｜近5日累計 {x['cum5dYi']:+.1f} 億｜今日 {x['achg']:+.2f}%）",
+            "detail": f"今日成交 {x['tYi']:.1f} 億（佔大盤 {x['tShare']}%），量價淨流 {x['pvYi']:+.1f} 億、法人 {x['iYi']:+.1f} 億（{x['il']:+,.0f} 張），定性：{x['flowTag']}。"
+        })
+
+    for x in consec_out[:4]:
+        st_days = abs(x["priceStreak"]) if x["priceStreak"] <= -3 else abs(x["instiStreak"])
+        st_lbl = f"連 {abs(x['priceStreak'])} 日量價淨流出" if x["priceStreak"] <= -3 else f"法人連 {abs(x['instiStreak'])} 日賣超"
+        streak_alerts.append({
+            "type": "outflow_streak", "level": "danger", "ind": x["ind"],
+            "streak": -st_days,
+            "tag": f"🚨 連續流出・{st_lbl}",
+            "title": f"{x['ind']}（{st_lbl}｜近5日累計 {x['cum5dYi']:+.1f} 億｜今日 {x['achg']:+.2f}%）",
+            "detail": f"今日成交 {x['tYi']:.1f} 億（佔大盤 {x['tShare']}%），量價淨流 {x['pvYi']:+.1f} 億、法人 {x['iYi']:+.1f} 億（{x['il']:+,.0f} 張），建議避開弱勢失血族群。"
+        })
+
+    # 偵測「終結連跌首日轉流入」或「拉價出貨大背離」重點提醒
+    turn_in = [x for x in all_sectors if x["prevStreak"] <= -2 and x["priceStreak"] == 1 and x["pvYi"] >= 5.0]
+    turn_in.sort(key=lambda x: x["pvYi"], reverse=True)
+    for x in turn_in[:2]:
+        streak_alerts.append({
+            "type": "turn_in", "level": "warn", "ind": x["ind"], "streak": 1,
+            "tag": "🔄 終結連跌轉流入",
+            "title": f"{x['ind']} 終結連 {abs(x['prevStreak'])} 日流出，今日首轉淨流入 {x['pvYi']:+.1f} 億",
+            "detail": f"今日均漲 {x['achg']:+.2f}%、法人 {x['iYi']:+.1f} 億；可觀察明日是否續紅確認真轉折。"
+        })
+
+    div_out = [x for x in all_sectors if x["pvYi"] >= 10.0 and x["iYi"] <= -10.0]
+    div_out.sort(key=lambda x: x["iYi"])
+    for x in div_out[:2]:
+        streak_alerts.append({
+            "type": "divergence", "level": "warn", "ind": x["ind"], "streak": x["priceStreak"],
+            "tag": "⚠️ 價漲法人大賣背離",
+            "title": f"{x['ind']} 量價收紅 {x['pvYi']:+.1f} 億，但三大法人反手大賣 {x['iYi']:+.1f} 億",
+            "detail": f"外資 {x['fYi']:+.1f} 億／投信 {x['trYi']:+.1f} 億，提防拉高出貨風險、切勿市價追高。"
+        })
+
+    if not streak_alerts:
+        top_in = inflow_sectors[0] if inflow_sectors else None
+        top_out = outflow_sectors[0] if outflow_sectors else None
+        streak_alerts.append({
+            "type": "neutral", "level": "ok", "ind": top_in["ind"] if top_in else "", "streak": 0,
+            "tag": "⚖️ 族群快速輪動",
+            "title": f"目前無連續 3 日以上極端單邊流向（今日最強：{top_in['ind'] if top_in else '—'}｜最弱：{top_out['ind'] if top_out else '—'}）",
+            "detail": "資金呈現一日輪動格局，操作以個股雙流共振與低乖離拉回為主。"
+        })
+
+    return {
+        "version": "V21.8.6",
+        "tradeDate": trade_dt,
+        "syncedAt": ts_now,
+        "recentDates": recent_dts[-5:],
+        "totalTurnoverYi": round(total_turnover_yi, 1),
+        "totalInstiYi": total_insti_yi,
+        "streakAlerts": streak_alerts,
+        "inflowSectors": inflow_sectors,
+        "outflowSectors": outflow_sectors,
+        "allSectors": sorted(all_sectors, key=lambda x: x["flowScore"], reverse=True),
+    }
+
+
 def lbl(sc):
     if sc >= 90: return ("極強勢", "優先觀察突破")
     if sc >= 85: return ("強勢", "主升段候選")
@@ -2115,7 +2395,7 @@ def main():
     t0 = time.time()
     MACRO = load_macro()
     log("==================================================")
-    log("🚀 V21.8.5 GitHub Actions 雲端全自動盤後更新引擎啟動！")
+    log("🚀 V21.8.6 GitHub Actions 雲端全自動盤後更新引擎啟動！")
     log(f"🕒 台灣時間：{NOW_TW.strftime('%Y-%m-%d %H:%M:%S')}")
     log("==================================================")
 
@@ -2148,7 +2428,7 @@ def main():
     trade_dt = patch_official_indices(gsum, gfr)
     log(f"  📅 官方基準交易日：{trade_dt}")
 
-    # 早上 06:00 美股極速重算模式（若既有資料已為最新台股收盤日且為 V21.8.5，約 20 秒完成）
+    # 早上 06:00 美股極速重算模式（若既有資料已為最新台股收盤日且為 V21.8.6，約 20 秒完成）
     if try_fast_us_morning_refresh(MACRO, gsum, trade_dt, t0):
         return
 
@@ -2635,6 +2915,14 @@ def main():
     else:
         rev_l.append(f"- 交易日 `{trade_dt}` 建檔完成，次一交易日盤後自動回測 TOP3 實績勝率。")
 
+    ts_now = NOW_TW.strftime("%Y-%m-%d %H:%M")
+    log("💰 執行 V21.8.6 台股版塊資金流出流入深度分析、連續流向偵測與各版塊 10 檔核心個股彙整...")
+    sector_analysis = build_sector_flow_analysis(stocks, daily_cache_mem, ph, trade_dt, ts_now)
+    if sector_analysis.get("inflowSectors") and sector_analysis.get("outflowSectors"):
+        _in0 = sector_analysis["inflowSectors"][0]
+        _out0 = sector_analysis["outflowSectors"][0]
+        log(f"  ✅ 版塊流向完成（總成交 {sector_analysis['totalTurnoverYi']} 億）｜最大流入：{_in0['ind']}（淨流 {_in0['pvYi']:+.1f}億/法人 {_in0['iYi']:+.1f}億/連{_in0['priceStreak']:+d}日）｜最大流出：{_out0['ind']}（淨流 {_out0['pvYi']:+.1f}億/法人 {_out0['iYi']:+.1f}億/連{_out0['priceStreak']:+d}日）｜提醒 {len(sector_analysis['streakAlerts'])} 則")
+
     ph[trade_dt] = {
         "ms": mkt_tot, "taiex": txc, "above20ma": p20,
         "top3": [{"code": r["code"], "name": r["name"], "price": r["price"], "sl": r["sl"], "v21": r["v21"]} for r in top3]
@@ -2645,7 +2933,7 @@ def main():
     hist_dates = sorted([d for d in ph if re.match(r"^\d{4}-\d{2}-\d{2}$", d)])[-60:]
     history_series = [{"dt": d, "ms": ph[d].get("ms", 50.0), "taiex": ph[d].get("taiex", 0.0), "above20ma": ph[d].get("above20ma", 0.0)} for d in hist_dates]
 
-    log("📝 [6/6] 正在輸出 V21.8.5 JSON、大盤+個股真實 K 線包與 17 節戰情報告...")
+    log("📝 [6/6] 正在輸出 V21.8.6 JSON、大盤+個股真實 K 線包與 17 節戰情報告...")
     st_m, act_m = lbl(mkt_tot)
     ts_now = NOW_TW.strftime("%Y-%m-%d %H:%M")
     pos_v21 = "70%～85%" if mkt_tot >= 80 else ("50%～65%" if mkt_tot >= 65 else "30%～45%")
@@ -2703,11 +2991,12 @@ def main():
     twse_dealer_est = round(twse_tot - fyi - tryi, 2) if isinstance(twse_tot, (int, float)) else 0.0
 
     meta_out = {
-        "version": "V21.8.5",
+        "version": "V21.8.6",
         "sessionLabel": us_impact["sessionLabel"],
         "usAnalysis": us_impact,
         "dualAlert": dual_bt,
         "marketRegime": taiex_bt,
+        "sectorAnalysis": sector_analysis,
         "date": trade_dt,
         "generatedAt": f"{ts_now} ({us_impact['sessionLabel']})",
         "sampleCount": len(stocks),
@@ -2766,15 +3055,17 @@ def main():
 
     with open(os.path.join(DATA_DIR, "v21_latest.json"), "w", encoding="utf-8") as f:
         json.dump(
-            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.8.5 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
+            {"meta": meta_out, "stocks": web_stocks, "sourceInfo": f"V21.8.6 自動更新 {trade_dt}（同步率 {sync_rate}%｜含{dual_bt['sampleSize']}檔3月回測）"},
             f, ensure_ascii=False, separators=(",", ":")
         )
     with open(os.path.join(DATA_DIR, "dual_alert_backtest.json"), "w", encoding="utf-8") as f:
         json.dump(dual_bt, f, ensure_ascii=False, indent=2)
     with open(os.path.join(DATA_DIR, "taiex_regime_backtest.json"), "w", encoding="utf-8") as f:
         json.dump(taiex_bt, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(DATA_DIR, "sector_flow.json"), "w", encoding="utf-8") as f:
+        json.dump(sector_analysis, f, ensure_ascii=False, indent=2)
 
-    # 2. V21.8.5 kline_bundle.json: Include TAIEX & OTC real daily bars + Top20/Core daily & 60m real bars!
+    # 2. V21.8.6 kline_bundle.json: Include TAIEX & OTC real daily bars + Top20/Core daily & 60m real bars!
     bundle_codes = set([r["code"] for r in top10] + [r["code"] for r in rs20[:10]] + ["2330", "2317", "2454", "2308", "2303", "2382", "3711", "2412", "2597", "2610", "2618", "1303", "2881", "2882", "6614", "3023"])
     kline_bundle = {"tradeDate": trade_dt, "indices": {}, "indices60m": {}, "daily": {}, "k60m": {}}
     for ik in ("TAIEX", "OTC"):
@@ -2799,7 +3090,7 @@ def main():
     inf = sorted(ist, key=lambda x: (x["achg"], x["il"]), reverse=True)[:6]
     outf = sorted(ist, key=lambda x: (x["achg"], x["il"]))[:6]
     md = [
-        f"# 台股二十大指標最終版（V21.8.5 雲端全自動版）每日量化戰情報告（{trade_dt}）",
+        f"# 台股二十大指標最終版（V21.8.6 雲端全自動版）每日量化戰情報告（{trade_dt}）",
         f"**行情基準日**：`{trade_dt}`（同步率 `{sync_rate}%`）｜**美股最新基準日**：`{us_impact['usDate']}`（{us_impact['sessionLabel']}）｜**產出時間**：{ts_now}｜**有效樣本**：`{len(stocks)}` 檔｜**大盤 V21 總分**：**`{mkt_tot}/100`（{st_m}／{act_m}）**\n",
         "---", "## 1｜全球經濟與美股"
     ]
@@ -2821,12 +3112,45 @@ def main():
            "## 4｜領先指標與落後指標",
            f"- **領先**：景氣領先「{MACRO['ndc_trend']}」、PMI新訂單 `{MACRO['pmi_new']}%`、費半 `{gsum.get('SOX', {}).get('chg', 0):+.2f}%`、美債10Y `{u10}%`。",
            f"- **落後/同時**：站上20MA占比 `{p20}%`、上市三大法人 `{twi.get('tot', 'N/A')}` 億、全市場融資變動 `{tmc:+,.0f}` 張。\n",
-           "## 5｜市場資金流入族群\n", "| 族群 | 家數 | 平均漲跌 | 平均RS | 法人合計(張) |", "| :--- | :---: | :---: | :---: | :---: |"]
-    for r in inf:
-        md.append(f"| {r['ind']} | {r['n']} | {r['achg']:+.2f}% | {r['ars']:.1f} | {r['il']:+,.0f} |")
-    md += ["\n## 6｜市場資金流出族群\n", "| 族群 | 家數 | 平均漲跌 | 平均RS | 法人合計(張) |", "| :--- | :---: | :---: | :---: | :---: |"]
-    for r in outf:
-        md.append(f"| {r['ind']} | {r['n']} | {r['achg']:+.2f}% | {r['ars']:.1f} | {r['il']:+,.0f} |")
+           "## 5｜台股版塊資金流入分析與連續流向提醒\n"]
+    md.append("### 🔔 版塊連續流出流入提醒")
+    for al in sector_analysis.get("streakAlerts", []):
+        md.append(f"- **[{al['tag']}] {al['title']}**：{al['detail']}")
+    md += [
+        "\n### 🟢 主要資金流入版塊（前 6 大｜含估計成交億、量價淨流億、法人億與連流天數）\n",
+        "| 版塊 | 家數 | 成交額(佔比) | 量價淨流(億) | 法人金額(億/張) | 均漲跌 | 連流天數(近5日) | 資金定性 |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |"
+    ]
+    for r in sector_analysis.get("inflowSectors", []):
+        st_s = f"連{r['priceStreak']}日入" if r['priceStreak'] > 0 else (f"連{abs(r['priceStreak'])}日出" if r['priceStreak'] < 0 else "持平")
+        dots = "".join("🔴" if d == "+" else ("🟢" if d == "-" else "⚪") for d in r.get("streak5d", []))
+        md.append(f"| **{r['ind']}** | {r['cnt']} | {r['tYi']:.1f}億 ({r['tShare']}%) | **{r['pvYi']:+.1f}** | {r['iYi']:+.1f}億 ({r['il']:+,.0f}) | {r['achg']:+.2f}% | {st_s} {dots} | {r['flowTag']} |")
+    for r in sector_analysis.get("inflowSectors", [])[:3]:
+        md += [
+            f"\n#### 🔥 主要流入版塊【{r['ind']}】10 檔主要個股（量價淨流 `{r['pvYi']:+.1f}` 億｜法人 `{r['iYi']:+.1f}` 億）\n",
+            "| # | 代號名稱 | 定位 | 收盤 | 漲跌 | 成交額(億) | 法人(張/億) | RS | V21 | 3%停損 |",
+            "| :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+        ]
+        for idx_s, st in enumerate(r.get("top10", [])[:10], 1):
+            md.append(f"| {idx_s} | **{st['c']} {st['n']}** | {st['role']} | {st['p']} | {st['ch']:+.2f}% | {st['tYi']:.2f} | {st['il']:+,.0f} ({st['iYi']:+.2f}億) | {st['rs']} | **{st['s']}** | {st['sl']} |")
+
+    md += [
+        "\n## 6｜台股版塊資金流出分析（前 6 大＋主要流出版塊 10 檔個股）\n",
+        "| 版塊 | 家數 | 成交額(佔比) | 量價淨流(億) | 法人金額(億/張) | 均漲跌 | 連流天數(近5日) | 資金定性 |",
+        "| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :--- |"
+    ]
+    for r in sector_analysis.get("outflowSectors", []):
+        st_s = f"連{r['priceStreak']}日入" if r['priceStreak'] > 0 else (f"連{abs(r['priceStreak'])}日出" if r['priceStreak'] < 0 else "持平")
+        dots = "".join("🔴" if d == "+" else ("🟢" if d == "-" else "⚪") for d in r.get("streak5d", []))
+        md.append(f"| **{r['ind']}** | {r['cnt']} | {r['tYi']:.1f}億 ({r['tShare']}%) | **{r['pvYi']:+.1f}** | {r['iYi']:+.1f}億 ({r['il']:+,.0f}) | {r['achg']:+.2f}% | {st_s} {dots} | {r['flowTag']} |")
+    for r in sector_analysis.get("outflowSectors", [])[:3]:
+        md += [
+            f"\n#### 🧊 主要流出版塊【{r['ind']}】10 檔主要個股（量價淨流 `{r['pvYi']:+.1f}` 億｜法人 `{r['iYi']:+.1f}` 億）\n",
+            "| # | 代號名稱 | 定位 | 收盤 | 漲跌 | 成交額(億) | 法人(張/億) | RS | V21 | 3%停損 |",
+            "| :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |"
+        ]
+        for idx_s, st in enumerate(r.get("top10", [])[:10], 1):
+            md.append(f"| {idx_s} | **{st['c']} {st['n']}** | {st['role']} | {st['p']} | {st['ch']:+.2f}% | {st['tYi']:.2f} | {st['il']:+,.0f} ({st['iYi']:+.2f}億) | {st['rs']} | **{st['s']}** | {st['sl']} |")
     md += ["\n## 7｜強勢股 RS 前 20 名\n", "| 排名 | 代號 | 名稱 | 產業 | 收盤 | 漲跌 | RS百分位 | 60分K MA240 (乖離%) | 張數 | V21 |", "| :---: | :---: | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: |"]
     for i, r in enumerate(rs20, 1):
         m240_s = f"{r['m240_60']} ({r['b240_60']:+.1f}%)" if r.get("m240_60") else "—"
@@ -2886,7 +3210,7 @@ def main():
             f"- **目前大盤位階判定**：**`{_cur['regimeName']}`**（風險等級 **`{_cur['riskLevel']}/5` — {_cur['riskLabel']}**｜建議總倉位上限 **`{_cur['posCap']}`**）。",
             f"- **關鍵均線與 2,000 檔廣度**：收盤 `{_cur['c']:,.1f}`｜20MA `{_cur['m20']:,.0f}`（`{_cur['b20']:+.2f}%`）｜60MA `{_cur['m60']:,.0f}`（`{_cur['b60']:+.2f}%`）｜240MA 年線 `{_cur['m240']:,.0f}`（`{_cur['b240']:+.2f}%`）｜2,000 檔站上月線 **`{_cur['abv20Pct']}%`**。",
             f"- **大盤 60分K MA240 分水嶺**：加權 60分K 240MA " + (f"`{tx_60m['m240']:,.1f}`（`{tx_60m['b240']:+.2f}%`，{tx_60m['status']}）" if tx_60m else "待更新") + "｜櫃買 60分K 240MA " + (f"`{otc_60m['m240']:,.2f}`（`{otc_60m['b240']:+.2f}%`，{otc_60m['status']}）" if otc_60m else "待更新") + "。",
-            f"- **2 年動態控倉回測驗證（{taiex_bt['tradingDays']} 交易日）**：V21.8.5 六階控倉總報酬 **`{_sv['v21Regime']['totalRet']:+.2f}%`** / 最大回撤 MDD **`{_sv['v21Regime']['mdd']}%`** / Calmar **`{_sv['v21Regime']['calmar']}`** vs. 大盤滿倉死抱總報酬 `{_sv['buyHold']['totalRet']:+.2f}%` / MDD `{_sv['buyHold']['mdd']}%`（少扛 **`{_sv['drawdownSavedPct']}%`** 跌幅，年化波動降低 **`{_sv['volReducedPct']}%`**）。",
+            f"- **2 年動態控倉回測驗證（{taiex_bt['tradingDays']} 交易日）**：V21.8.6 六階控倉總報酬 **`{_sv['v21Regime']['totalRet']:+.2f}%`** / 最大回撤 MDD **`{_sv['v21Regime']['mdd']}%`** / Calmar **`{_sv['v21Regime']['calmar']}`** vs. 大盤滿倉死抱總報酬 `{_sv['buyHold']['totalRet']:+.2f}%` / MDD `{_sv['buyHold']['mdd']}%`（少扛 **`{_sv['drawdownSavedPct']}%`** 跌幅，年化波動降低 **`{_sv['volReducedPct']}%`**）。",
             "\n### 2 年六大位階歷史統計（未來 5日 / 10日 / 20日大盤實測）\n",
             "| 位階燈號 | 建議倉位 | 出現天數(占比) | 未來5日勝率/均報 | 未來10日勝率/均報 | 未來20日勝率/均報 | 20日均回撤/最壞 |",
             "| :--- | :---: | :---: | :---: | :---: | :---: | :---: |",
@@ -2921,7 +3245,7 @@ def main():
         w.writeheader()
         w.writerows(sorted_stocks)
 
-    log(f"🎉 V21.8.5 雲端全自動更新完成！（耗時 {time.time() - t0:.1f} 秒｜{len(stocks)} 檔｜基準日 {trade_dt}｜大盤 V21 {mkt_tot}）")
+    log(f"🎉 V21.8.6 雲端全自動更新完成！（耗時 {time.time() - t0:.1f} 秒｜{len(stocks)} 檔｜基準日 {trade_dt}｜大盤 V21 {mkt_tot}）")
 
 
 if __name__ == "__main__":
