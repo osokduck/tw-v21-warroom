@@ -323,7 +323,7 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
   </div>
   <nav class="nav-tabs" id="desktopNav">
     <button class="nav-tab active" data-tab="overview">📊 戰情總覽</button>
-    <button class="nav-tab" data-tab="indicators">🎯 二十大指標</button>
+    <button class="nav-tab" data-tab="sectors">💰 資金板塊</button>
     <button class="nav-tab" data-tab="top10">🔥 TOP10與雷達</button>
     <button class="nav-tab" data-tab="kline">📈 三竹K線與試算</button>
     <button class="nav-tab" data-tab="screener">🔎 全市場篩選</button>
@@ -454,7 +454,7 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
   </section>
 
   <!-- ==================== TAB 2: 20 INDICATORS ==================== -->
-  <section id="tab-indicators" class="tab-pane">
+  <section id="tab-indicators" class="tab-pane" style="display:none !important;" aria-hidden="true">
     <div class="card">
       <div class="card-hdr">
         <div>
@@ -508,29 +508,26 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
       </div>
     </div>
 
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-hdr"><div class="card-title">🚀 跳空突破與未回補分析</div></div>
-        <div class="tbl-wrap">
-          <table>
-            <thead><tr><th class="l">代號名稱</th><th>收盤</th><th>漲跌</th><th>V21</th><th>法人(張)</th><th class="l">缺口狀態</th></tr></thead>
-            <tbody id="gapBody"></tbody>
-          </table>
-        </div>
+    <div class="card">
+      <div class="card-hdr">
+        <div class="card-title">🚀 跳空突破與未回補分析</div>
+        <button class="btn btn-sm" onclick="jumpToSectorFlow()">💰 切換資金板塊頁 →</button>
       </div>
-      <div class="card">
-        <div class="card-hdr">
-          <div class="card-title">💰 產業族群「漲幅 vs. 法人籌碼」背離圖</div>
-          <span class="muted" style="font-size:10.5px;">紅＝法人買超 / 綠＝法人賣超</span>
-        </div>
-        <canvas id="sectorCanvas" class="chart-cv" height="260"></canvas>
+      <div class="tbl-wrap">
+        <table>
+          <thead><tr><th class="l">代號名稱</th><th>收盤</th><th>漲跌</th><th>V21</th><th>法人(張)</th><th class="l">缺口狀態</th></tr></thead>
+          <tbody id="gapBody"></tbody>
+        </table>
       </div>
     </div>
+  </section>
 
-    <!-- V21.8.6 Taiwan Sector Capital Inflow / Outflow Deep Analysis & Consecutive Alerts -->
+  <!-- ==================== TAB 2 (STANDALONE): CAPITAL SECTOR FLOW ==================== -->
+  <section id="tab-sectors" class="tab-pane">
+    <!-- Taiwan Sector Capital Inflow / Outflow Deep Analysis & Consecutive Alerts -->
     <div class="card" id="sectorFlowSection">
       <div class="card-hdr">
-        <div class="card-title">💰 台股版塊資金流出流入深度分析與連續流向提醒 <span class="badge b-cyan" id="secFlowMetaBadge">載入中...</span></div>
+        <div class="card-title">💰 台股資金板塊流出流入深度分析與連續流向提醒 <span class="badge b-cyan" id="secFlowMetaBadge">載入中...</span></div>
         <div style="display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
           <select id="secSortSel" class="ctrl" style="padding:4px 7px;font-size:11px;">
             <option value="flowScore">依綜合資金流排序</option>
@@ -544,12 +541,12 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
       <div class="ralert-list" id="sectorStreakAlertsBox" style="margin-top:0;margin-bottom:10px;"></div>
       <div class="grid-2">
         <div>
-          <div style="font-size:12.5px;font-weight:800;margin-bottom:6px;color:#f87171;">🔥 主要資金流入版塊（前 6 大｜點擊列看 10 檔個股）</div>
+          <div style="font-size:12.5px;font-weight:800;margin-bottom:6px;color:#f87171;">🔥 主要資金流入板塊（前 6 大｜點擊列看 10 檔個股）</div>
           <div class="tbl-wrap">
             <table>
               <thead>
                 <tr>
-                  <th class="l">產業版塊</th><th class="c">連流/近5日</th><th>量價淨流(億)</th>
+                  <th class="l">產業板塊</th><th class="c">連流/近5日</th><th>量價淨流(億)</th>
                   <th>法人(億)</th><th>成交(佔比)</th><th>均漲跌</th><th class="l">資金定性</th>
                 </tr>
               </thead>
@@ -558,12 +555,12 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
           </div>
         </div>
         <div>
-          <div style="font-size:12.5px;font-weight:800;margin-bottom:6px;color:#4ade80;">🧊 主要資金流出版塊（前 6 大｜點擊列看 10 檔個股）</div>
+          <div style="font-size:12.5px;font-weight:800;margin-bottom:6px;color:#4ade80;">🧊 主要資金流出板塊（前 6 大｜點擊列看 10 檔個股）</div>
           <div class="tbl-wrap">
             <table>
               <thead>
                 <tr>
-                  <th class="l">產業版塊</th><th class="c">連流/近5日</th><th>量價淨流(億)</th>
+                  <th class="l">產業板塊</th><th class="c">連流/近5日</th><th>量價淨流(億)</th>
                   <th>法人(億)</th><th>成交(佔比)</th><th>均漲跌</th><th class="l">資金定性</th>
                 </tr>
               </thead>
@@ -574,13 +571,13 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
       </div>
     </div>
 
-    <!-- V21.8.6 Major Inflow / Outflow Sector Top 10 Key Stocks Drilldown -->
+    <!-- Major Inflow / Outflow Sector Top 10 Key Stocks Drilldown -->
     <div class="card" id="sectorTop10Card">
       <div class="card-hdr">
-        <div class="card-title">📋 主要流入／流出版塊 10 檔主要個股明細 <span class="badge b-amber" id="secTop10ActiveBadge">—</span></div>
+        <div class="card-title">📋 主要流入／流出板塊 10 檔主要個股明細 <span class="badge b-amber" id="secTop10ActiveBadge">—</span></div>
         <div class="filter-bar" id="secDirTabs" style="margin-bottom:0;">
-          <button class="fchip active" data-sdir="inflow">🔥 主要流入版塊</button>
-          <button class="fchip" data-sdir="outflow">🧊 主要流出版塊</button>
+          <button class="fchip active" data-sdir="inflow">🔥 主要流入板塊</button>
+          <button class="fchip" data-sdir="outflow">🧊 主要流出板塊</button>
         </div>
       </div>
       <div class="sec-pill-bar" id="secTop10Pills"></div>
@@ -589,7 +586,7 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
         <table>
           <thead>
             <tr>
-              <th class="c">#</th><th class="l">代號名稱</th><th class="l">版塊角色</th>
+              <th class="c">#</th><th class="l">代號名稱</th><th class="l">板塊角色</th>
               <th>現價</th><th>漲跌%</th><th>成交額(億)</th><th>張數</th>
               <th>法人(張/億)</th><th>外資/投信(張)</th><th class="c">RS</th><th class="c">V21</th>
               <th>3%停損</th><th class="l">60分K三刀流</th>
@@ -598,6 +595,15 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
           <tbody id="secTop10Body"></tbody>
         </table>
       </div>
+    </div>
+
+    <!-- Sector Institutional Capital Flow Chart -->
+    <div class="card">
+      <div class="card-hdr">
+        <div class="card-title">📊 產業板塊「三大法人買賣超金額(億)」強弱排行圖</div>
+        <span class="muted" style="font-size:10.5px;">紅＝法人買超(億) / 綠＝法人賣超(億)</span>
+      </div>
+      <canvas id="sectorCanvas" class="chart-cv" height="270"></canvas>
     </div>
   </section>
 
@@ -716,7 +722,7 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
 <!-- Mobile Bottom Navigation -->
 <nav class="bottom-nav" id="mobileNav">
   <button class="bnav-btn active" data-tab="overview"><span class="ico">📊</span>總覽</button>
-  <button class="bnav-btn" data-tab="indicators"><span class="ico">🎯</span>20指標</button>
+  <button class="bnav-btn" data-tab="sectors"><span class="ico">💰</span>資金板塊</button>
   <button class="bnav-btn" data-tab="top10"><span class="ico">🔥</span>TOP10</button>
   <button class="bnav-btn" data-tab="kline"><span class="ico">📈</span>K線</button>
   <button class="bnav-btn" data-tab="screener"><span class="ico">🔎</span>全市場</button>
@@ -1347,7 +1353,7 @@ function switchTab(tab) {
   document.querySelectorAll(".tab-pane").forEach(p => p.classList.toggle("active", p.id === "tab-" + tab));
   document.querySelectorAll(".nav-tab, .bnav-btn").forEach(b => b.classList.toggle("active", b.dataset.tab === tab));
   if (tab === "overview") { drawTrendChart(); drawPillarChart(); drawDistChart(); }
-  if (tab === "top10") { drawSectorChart(); }
+  if (tab === "sectors") { renderSectorFlowDeep(); drawSectorChart(); }
   if (tab === "kline") { renderKlineView(); }
   if (tab === "screener") { renderScreener(); }
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1459,7 +1465,7 @@ async function loadCloudSectorFlow() {
     if (r && Array.isArray(r.inflowSectors) && r.inflowSectors.length) {
       appMeta.sectorAnalysis = r;
       renderOverviewSectorFlow();
-      if (activeTab === "top10") renderSectorFlowDeep();
+      if (activeTab === "sectors") { renderSectorFlowDeep(); drawSectorChart(); }
     }
   } catch (e) {}
 }
@@ -2801,12 +2807,13 @@ function renderOverviewSectorFlow() {
 function jumpToSectorFlow(dir, indName) {
   if (dir) activeSecDir = dir;
   if (indName) activeSecInd = indName;
-  switchTab("top10");
-  setTimeout(() => {
-    const targetId = indName ? "sectorTop10Card" : "sectorFlowSection";
-    const el = document.getElementById(targetId);
-    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, 80);
+  switchTab("sectors");
+  if (indName) {
+    setTimeout(() => {
+      const el = document.getElementById("sectorTop10Card");
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 90);
+  }
 }
 
 function selectSectorTop10(dir, indName) {
@@ -4138,7 +4145,7 @@ function renderAll() {
 
 window.addEventListener("resize", () => {
   if (activeTab === "overview") { drawTrendChart(); drawPillarChart(); drawDistChart(); }
-  if (activeTab === "top10") drawSectorChart();
+  if (activeTab === "sectors") drawSectorChart();
   if (activeTab === "kline") drawKlineCanvas();
 });
 
