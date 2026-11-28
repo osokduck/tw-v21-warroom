@@ -337,7 +337,6 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
     <div class="alert-banner alert-sl" id="portfolioAlertBanner" style="display:none;"></div>
     <div class="alert-banner alert-dual-bull" id="dualWatchAlertBanner" style="display:none;"></div>
     <div class="alert-banner alert-rebound-ready" id="reboundAlertBanner" style="display:none;"></div>
-    <div class="alert-banner alert-sector-flow" id="sectorStreakBanner" style="display:none;"></div>
 
     <div class="alert-banner" id="topAlertBanner">
       <div style="font-size:18px;">⚠️</div>
@@ -374,13 +373,12 @@ input[type=range].ind-slider { width: 105px; accent-color: var(--cyan); vertical
       </div>
       <div class="tbl-wrap" id="ovWatchBox"></div>
     </div>
-    <!-- V21.8.7 Sector Capital Flow & Consecutive Streak Overview Card -->
+    <!-- V21.8.7 Sector Capital Flow Quick Preview Card (Full Alerts in Standalone 資金板塊 Tab) -->
     <div class="card" id="ovSectorFlowCard">
       <div class="card-hdr">
-        <div class="card-title">💰 台股版塊資金流向與連續流出流入提醒 <span class="badge b-cyan" id="ovSecTotalBadge">統計中...</span></div>
-        <button class="btn btn-primary btn-sm" onclick="jumpToSectorFlow()">完整版塊與 10 檔個股 →</button>
+        <div class="card-title">💰 台股資金板塊 TOP3 速覽 <span class="badge b-cyan" id="ovSecTotalBadge">統計中...</span></div>
+        <button class="btn btn-primary btn-sm" onclick="jumpToSectorFlow()">完整資金板塊與提醒 →</button>
       </div>
-      <div class="ralert-list" id="ovSectorStreakList" style="margin-top:0;margin-bottom:9px;"></div>
       <div class="grid-2" id="ovSectorPreviewGrid"></div>
     </div>
 
@@ -2808,34 +2806,9 @@ function fmtStreakBadge(r) {
 
 function renderOverviewSectorFlow() {
   const sa = computeLiveSectorAnalysis();
-  // 1. 首頁頂部連續流出流入橫幅（只要有連續 >= 3 日流入或流出即自動亮燈提醒）
-  const banner = document.getElementById("sectorStreakBanner");
-  if (banner) {
-    const hiAlerts = (sa.streakAlerts || []).filter(a => a.type === "inflow_streak" || a.type === "outflow_streak");
-    if (hiAlerts.length) {
-      banner.style.display = "flex";
-      const lines = hiAlerts.slice(0, 3).map(a => `<span class="badge ${a.type === 'inflow_streak' ? 'b-up' : 'b-down'}" style="margin-right:4px;">${a.tag}</span><strong>${a.ind}</strong>（${a.title.split("（")[1] || ""}）`).join("<br>");
-      banner.innerHTML = `<div style="font-size:18px;">💰</div><div style="flex:1;"><strong class="cyan">台股版塊「連續資金流出／流入」重點提醒</strong> <button class="btn btn-sm" style="margin-left:6px;padding:1px 7px;font-size:10.5px;" onclick="jumpToSectorFlow()">看版塊 10 檔個股 →</button><div style="margin-top:4px;line-height:1.6;">${lines}</div></div>`;
-    } else {
-      banner.style.display = "none";
-    }
-  }
-
-  // 2. 首頁版塊流向卡片
+  // 首頁僅保留精簡版塊 TOP3 速覽（連續流出流入重點提醒集中在獨立「💰 資金板塊」分頁）
   const badge = document.getElementById("ovSecTotalBadge");
   if (badge) badge.textContent = `估計總成交 ${fmtNum(sa.totalTurnoverYi, 0)} 億｜${sa.syncedAt}`;
-
-  const alertBox = document.getElementById("ovSectorStreakList");
-  if (alertBox) {
-    alertBox.innerHTML = (sa.streakAlerts || []).slice(0, 4).map(al => {
-      const bCls = al.level === "danger" ? "b-down" : (al.level === "warn" ? "b-amber" : "b-up");
-      const rCls = al.level === "danger" ? "danger" : (al.level === "warn" ? "warn" : "ok");
-      return `<div class="ralert-item ${rCls}" style="cursor:pointer;" onclick="jumpToSectorFlow('${al.type === 'outflow_streak' ? 'outflow' : 'inflow'}', '${al.ind || ''}')">
-        <div style="font-weight:800;margin-bottom:1px;"><span class="badge ${bCls}" style="margin-right:5px;">${al.tag}</span>${al.title}</div>
-        <div class="muted" style="font-size:11px;">${al.detail}</div>
-      </div>`;
-    }).join("");
-  }
 
   const prevGrid = document.getElementById("ovSectorPreviewGrid");
   if (prevGrid) {
